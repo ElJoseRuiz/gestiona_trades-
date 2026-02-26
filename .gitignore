@@ -1,0 +1,22 @@
+# Config con credenciales
+config.yaml
+config_old.yaml
+
+# Base de datos
+data/
+
+# Logs
+logs/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.py[cod]
+
+# Entornos virtuales
+venv/
+.env
+env/

@@ -1,0 +1,14 @@
+# Requisitos de gestiona_trades
+# Python 3.11+ requerido — compatible con Linux y Windows
+#
+# Instalación:
+#   pip install -r requirements.txt
+#
+# Nota Windows: el script gestiona automáticamente el event loop de asyncio
+# (WindowsSelectorEventLoopPolicy) requerido por aiohttp. No se necesita
+# ninguna dependencia adicional.
+
+aiohttp>=3.9.0
+aiosqlite>=0.19.0
+PyYAML>=6.0.1
+websockets>=12.0

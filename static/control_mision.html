@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gestiona Trades — Dashboard</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0d0f1a;color:#c9cde0;font-family:'Consolas','Fira Code',monospace;font-size:13px}
+  a{color:#64b5f6;text-decoration:none}
+
+  /* ── Layout ── */
+  .topbar{background:#141726;border-bottom:1px solid #232740;padding:10px 16px;
+    display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+  .topbar h1{font-size:15px;color:#e0e3f0;letter-spacing:1px}
+  .main{padding:12px 14px;display:flex;flex-direction:column;gap:12px}
+
+  /* ── Status bar ── */
+  .status-bar{display:flex;gap:8px;flex-wrap:wrap}
+  .stat-chip{background:#1a1d2e;border:1px solid #2d3150;border-radius:6px;
+    padding:6px 12px;display:flex;flex-direction:column;gap:2px;min-width:110px}
+  .stat-chip .label{font-size:10px;color:#6b7294;text-transform:uppercase;letter-spacing:.5px}
+  .stat-chip .value{font-size:15px;font-weight:bold;color:#e0e3f0}
+  .stat-chip .value.pos{color:#2dc653}
+  .stat-chip .value.neg{color:#e63946}
+  .stat-chip .value.warn{color:#f4a261}
+
+  /* ── Conexiones ── */
+  .conn-row{display:flex;gap:8px;align-items:center;font-size:11px}
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px}
+  .dot.green{background:#2dc653}
+  .dot.red{background:#e63946}
+  .dot.yellow{background:#f4a261;animation:blink 1s infinite}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+
+  /* ── Secciones ── */
+  .section{background:#141726;border:1px solid #232740;border-radius:8px;overflow:hidden}
+  .section-title{padding:8px 12px;background:#1a1d2e;font-size:11px;
+    color:#8b8fa8;text-transform:uppercase;letter-spacing:.8px;
+    border-bottom:1px solid #232740;display:flex;justify-content:space-between}
+  .section-body{overflow-x:auto}
+
+  /* ── Tablas ── */
+  table{width:100%;border-collapse:collapse}
+  th{padding:6px 10px;font-size:10px;color:#6b7294;text-align:left;
+    text-transform:uppercase;letter-spacing:.4px;background:#141726;
+    border-bottom:1px solid #232740;white-space:nowrap}
+  td{padding:5px 10px;border-bottom:1px solid #1e2138;white-space:nowrap;vertical-align:middle}
+  tr:hover td{background:#1a1d2e}
+  .no-data{text-align:center;color:#4a4e6a;padding:24px;font-style:italic}
+
+  /* ── Badges de estado ── */
+  .badge{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:bold}
+  .badge.open{background:#1a3a2a;color:#2dc653;border:1px solid #2dc65360}
+  .badge.opening{background:#2a2a1a;color:#f4a261;border:1px solid #f4a26160}
+  .badge.closed{background:#1a1a2a;color:#6b7294;border:1px solid #6b729460}
+  .badge.not_executed{background:#2a1a1a;color:#e63946;border:1px solid #e6394660}
+  .badge.closing{background:#2a1f1a;color:#f4a261;border:1px solid #f4a26160}
+  .badge.error{background:#2a0a0a;color:#ff6b6b;border:1px solid #ff6b6b60}
+  .badge.signal_received{background:#1a2a3a;color:#64b5f6;border:1px solid #64b5f660}
+
+  /* ── Colores PnL ── */
+  .pos{color:#2dc653}
+  .neg{color:#e63946}
+  .muted{color:#6b7294}
+
+  /* ── Log de eventos ── */
+  .event-log{height:280px;overflow-y:auto;padding:0}
+  .event-row{padding:4px 10px;border-bottom:1px solid #1a1d2e;
+    display:flex;gap:8px;align-items:baseline;font-size:11px}
+  .event-row:hover{background:#1a1d2e}
+  .event-ts{color:#4a4e6a;min-width:85px;flex-shrink:0}
+  .event-type{min-width:90px;font-weight:bold;flex-shrink:0}
+  .event-pair{min-width:80px;color:#64b5f6;flex-shrink:0}
+  .event-detail{color:#8b8fa8;overflow:hidden;text-overflow:ellipsis}
+
+  /* Colores por tipo de evento */
+  .etype-tp_fill,.etype-tp_placed{color:#2dc653}
+  .etype-sl_fill{color:#e63946}
+  .etype-sl_placed{color:#e6924a}
+  .etype-entry_fill,.etype-entry_sent{color:#64b5f6}
+  .etype-timeout{color:#f4a261}
+  .etype-error{color:#ff6b6b}
+  .etype-signal{color:#a78bfa}
+  .etype-ws_connect,.etype-startup{color:#2dc653}
+  .etype-ws_disconnect,.etype-shutdown{color:#e63946}
+
+  /* ── Barra inferior ── */
+  .footer{font-size:10px;color:#3a3d52;text-align:center;padding:8px}
+
+  /* ── Spinner ── */
+  .spinner{display:inline-block;width:12px;height:12px;border:2px solid #3a3d52;
+    border-top-color:#64b5f6;border-radius:50%;animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ── Botones ── */
+  .btn{padding:4px 10px;border-radius:5px;border:1px solid #3a3d52;
+    background:#1a1d2e;color:#c9cde0;cursor:pointer;font-size:11px;font-family:inherit}
+  .btn:hover{background:#232740;border-color:#64b5f6}
+  .btn-danger{border-color:#e6394660;color:#e63946}
+  .btn-danger:hover{background:#2a1010}
+</style>
+</head>
+<body>
+
+<!-- ── Topbar ── -->
+<div class="topbar">
+  <div style="display:flex;align-items:center;gap:14px">
+    <h1>📈 Gestiona Trades</h1>
+    <div class="conn-row">
+      <span><span class="dot" id="dot-ws-binance"></span>Binance WS</span>
+      <span><span class="dot" id="dot-ws-dash"></span>Dashboard WS</span>
+    </div>
+  </div>
+  <div style="font-size:11px;color:#4a4e6a" id="last-update">—</div>
+</div>
+
+<!-- ── Main ── -->
+<div class="main">
+
+  <!-- Status chips -->
+  <div class="status-bar" id="status-bar">
+    <div class="stat-chip"><span class="label">Balance USDT</span><span class="value" id="s-balance">—</span></div>
+    <div class="stat-chip"><span class="label">Trades abiertos</span><span class="value" id="s-open">—</span></div>
+    <div class="stat-chip"><span class="label">PnL del día</span><span class="value" id="s-pnl-day">—</span></div>
+    <div class="stat-chip"><span class="label">PnL total</span><span class="value" id="s-pnl-total">—</span></div>
+    <div class="stat-chip"><span class="label">Trades hoy</span><span class="value" id="s-trades-today">—</span></div>
+    <div class="stat-chip"><span class="label">Win Rate</span><span class="value" id="s-wr">—</span></div>
+    <div class="stat-chip"><span class="label">Uptime desde</span><span class="value" id="s-uptime" style="font-size:11px">—</span></div>
+  </div>
+
+  <!-- Trades abiertos -->
+  <div class="section">
+    <div class="section-title">
+      <span>Trades Abiertos</span>
+      <span id="open-count" class="muted">0</span>
+    </div>
+    <div class="section-body">
+      <table>
+        <thead>
+          <tr>
+            <th>Par</th><th>Estado</th><th>Entry Price</th>
+            <th>TP / Trigger</th><th>SL / Trigger</th>
+            <th>PnL est. %</th><th>Tiempo</th><th>Señal top</th>
+          </tr>
+        </thead>
+        <tbody id="tbl-open"><tr><td class="no-data" colspan="8">Sin trades abiertos</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Trades cerrados recientes -->
+  <div class="section">
+    <div class="section-title">
+      <span>Últimos Trades Cerrados</span>
+    </div>
+    <div class="section-body">
+      <table>
+        <thead>
+          <tr>
+            <th>Par</th><th>Estado</th><th>Entry</th><th>Exit</th>
+            <th>PnL USDT</th><th>PnL %</th><th>Motivo</th>
+            <th>Duración</th><th>Fees</th>
+          </tr>
+        </thead>
+        <tbody id="tbl-closed"><tr><td class="no-data" colspan="9">—</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Log de eventos -->
+  <div class="section">
+    <div class="section-title">
+      <span>Log de eventos en vivo</span>
+      <label style="font-size:10px;cursor:pointer">
+        <input type="checkbox" id="chk-autoscroll" checked> autoscroll
+      </label>
+    </div>
+    <div class="event-log" id="event-log"></div>
+  </div>
+
+</div>
+<div class="footer">gestiona_trades v1 · actualización en tiempo real vía WebSocket</div>
+
+<script>
+// ─────────────────────────────────────────────────────────
+// Estado global
+// ─────────────────────────────────────────────────────────
+let trades  = [];   // todos los trades recibidos
+let ws      = null;
+let wsRetry = 1000;
+
+const fmtPrice  = v => v != null ? (+v).toFixed(6).replace(/\.?0+$/, '') : '—';
+const fmtPct    = v => v != null ? (v >= 0 ? '+' : '') + (+v).toFixed(2) + '%' : '—';
+const fmtUSDT   = v => v != null ? (v >= 0 ? '+' : '') + (+v).toFixed(4) : '—';
+const fmtFees   = v => v != null ? (+v).toFixed(4) : '—';
+
+function pnlClass(v) { return v == null ? '' : v >= 0 ? 'pos' : 'neg'; }
+
+function badge(status) {
+  const labels = {
+    open:'OPEN', opening:'OPENING', closing:'CLOSING',
+    closed:'CLOSED', not_executed:'NO EXEC', error:'ERROR',
+    signal_received:'SEÑAL',
+  };
+  return `<span class="badge ${status}">${labels[status] || status}</span>`;
+}
+
+function exitIcon(t) {
+  if (!t.exit_type) return '—';
+  const icons = { tp:'✅ TP', sl:'❌ SL', timeout:'⏰ timeout', manual:'🖐 manual' };
+  return icons[t.exit_type] || t.exit_type;
+}
+
+function duration(t) {
+  const ref = t.exit_fill_ts || new Date().toISOString();
+  const from = t.entry_fill_ts || t.created_at;
+  if (!from) return '—';
+  const ms = new Date(ref) - new Date(from);
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  return `${h}h${m.toString().padStart(2,'0')}m`;
+}
+
+function elapsed(ts) {
+  if (!ts) return '—';
+  const ms = Date.now() - new Date(ts).getTime();
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function fmtTs(ts) {
+  if (!ts) return '—';
+  try {
+    return new Date(ts).toLocaleTimeString('es-ES', { hour12: false });
+  } catch(e) { return ts.slice(11,19); }
+}
+
+// ─────────────────────────────────────────────────────────
+// Render tablas
+// ─────────────────────────────────────────────────────────
+
+function renderOpen() {
+  const open = trades.filter(t =>
+    ['open','opening','signal_received','closing'].includes(t.status)
+  ).sort((a,b) => (b.created_at || '').localeCompare(a.created_at || ''));
+
+  document.getElementById('open-count').textContent = open.length;
+
+  if (!open.length) {
+    document.getElementById('tbl-open').innerHTML =
+      '<tr><td class="no-data" colspan="8">Sin trades abiertos</td></tr>';
+    return;
+  }
+
+  document.getElementById('tbl-open').innerHTML = open.map(t => {
+    const pnlEst = t.entry_price
+      ? ((t.entry_price - t.entry_price * 0.85) / t.entry_price * 100).toFixed(2)
+      : null;   // placeholder — sin precio live
+    return `<tr>
+      <td><b>${t.pair}</b></td>
+      <td>${badge(t.status)}</td>
+      <td>${fmtPrice(t.entry_price)}</td>
+      <td>${fmtPrice(t.tp_price)} <span class="muted">(${fmtPrice(t.tp_trigger_price)})</span></td>
+      <td>${fmtPrice(t.sl_price)} <span class="muted">(${fmtPrice(t.sl_trigger_price)})</span></td>
+      <td class="${pnlClass(t.pnl_pct)}">${fmtPct(t.pnl_pct)}</td>
+      <td>${elapsed(t.entry_fill_ts || t.created_at)}</td>
+      <td class="muted">${t.signal_data?.top || '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderClosed() {
+  const closed = trades
+    .filter(t => ['closed','not_executed','error'].includes(t.status))
+    .sort((a,b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
+    .slice(0, 40);
+
+  if (!closed.length) {
+    document.getElementById('tbl-closed').innerHTML =
+      '<tr><td class="no-data" colspan="9">—</td></tr>';
+    return;
+  }
+
+  document.getElementById('tbl-closed').innerHTML = closed.map(t => `<tr>
+    <td><b>${t.pair}</b></td>
+    <td>${badge(t.status)}</td>
+    <td>${fmtPrice(t.entry_price)}</td>
+    <td>${fmtPrice(t.exit_price)}</td>
+    <td class="${pnlClass(t.pnl_usdt)}">${fmtUSDT(t.pnl_usdt)}</td>
+    <td class="${pnlClass(t.pnl_pct)}">${fmtPct(t.pnl_pct)}</td>
+    <td>${exitIcon(t)}</td>
+    <td>${duration(t)}</td>
+    <td class="muted">${fmtFees(t.fees_usdt)}</td>
+  </tr>`).join('');
+}
+
+function renderStats() {
+  const closed = trades.filter(t => t.status === 'closed' && t.pnl_usdt != null);
+  const today  = new Date().toISOString().slice(0, 10);
+  const todayC = closed.filter(t => (t.updated_at || '').startsWith(today));
+
+  const pnlTotal = closed.reduce((s, t) => s + (t.pnl_usdt || 0), 0);
+  const pnlDay   = todayC.reduce((s, t) => s + (t.pnl_usdt || 0), 0);
+  const wins     = closed.filter(t => t.pnl_usdt > 0).length;
+  const wr       = closed.length ? (wins / closed.length * 100).toFixed(1) + '%' : '—';
+
+  const openNow  = trades.filter(t =>
+    ['open','opening','signal_received','closing'].includes(t.status)).length;
+
+  setStat('s-open',        openNow,                                          openNow > 0 ? 'warn' : '');
+  setStat('s-pnl-total',   fmtUSDT(pnlTotal) + ' USDT',                    pnlClass(pnlTotal));
+  setStat('s-pnl-day',     fmtUSDT(pnlDay) + ' USDT',                      pnlClass(pnlDay));
+  setStat('s-trades-today',todayC.length);
+  setStat('s-wr',          wr,                                               wins / (closed.length || 1) >= 0.5 ? 'pos' : 'neg');
+}
+
+function setStat(id, val, cls='') {
+  const el = document.getElementById(id);
+  el.textContent = val;
+  el.className = 'value' + (cls ? ' ' + cls : '');
+}
+
+// ─────────────────────────────────────────────────────────
+// Log de eventos
+// ─────────────────────────────────────────────────────────
+
+function appendEvent(ev) {
+  const log = document.getElementById('event-log');
+  const row = document.createElement('div');
+  row.className = 'event-row';
+
+  const details = ev.details || {};
+  let detailStr = '';
+  if (details.pair)     detailStr += `${details.pair} `;
+  if (details.price)    detailStr += `@ ${fmtPrice(details.price)} `;
+  if (details.qty)      detailStr += `qty=${details.qty} `;
+  if (details.trigger)  detailStr += `trigger=${fmtPrice(details.trigger)} `;
+  if (details.msg)      detailStr += details.msg;
+  if (details.hours)    detailStr += `(${(+details.hours).toFixed(1)}h)`;
+  if (details.attempt)  detailStr += `attempt=${details.attempt} `;
+  if (details.error)    detailStr += details.error;
+
+  row.innerHTML = `
+    <span class="event-ts">${fmtTs(ev.timestamp)}</span>
+    <span class="event-type etype-${ev.event_type}">${ev.event_type}</span>
+    <span class="event-pair">${ev.trade_id ? ev.trade_id.slice(0,8) : '—'}</span>
+    <span class="event-detail">${detailStr || JSON.stringify(details).slice(0,80)}</span>
+  `;
+
+  log.appendChild(row);
+
+  const chk = document.getElementById('chk-autoscroll');
+  if (chk && chk.checked) {
+    log.scrollTop = log.scrollHeight;
+  }
+
+  // Limitar a 500 filas
+  while (log.children.length > 500) {
+    log.removeChild(log.firstChild);
+  }
+}
+
+// ─────────────────────────────────────────────────────────
+// WebSocket
+// ─────────────────────────────────────────────────────────
+
+function setDot(id, state) {
+  const el = document.getElementById(id);
+  el.className = 'dot ' + state;
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const url   = `${proto}://${location.host}/ws`;
+  ws = new WebSocket(url);
+  setDot('dot-ws-dash', 'yellow');
+
+  ws.onopen = () => {
+    setDot('dot-ws-dash', 'green');
+    wsRetry = 1000;
+    document.getElementById('last-update').textContent =
+      'WS conectado ' + new Date().toLocaleTimeString();
+  };
+
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      handleMessage(msg);
+    } catch(err) { console.error('WS parse error', err); }
+  };
+
+  ws.onerror = () => setDot('dot-ws-dash', 'red');
+  ws.onclose = () => {
+    setDot('dot-ws-dash', 'red');
+    setTimeout(connect, wsRetry);
+    wsRetry = Math.min(wsRetry * 2, 30000);
+  };
+}
+
+function handleMessage(msg) {
+  document.getElementById('last-update').textContent =
+    new Date().toLocaleTimeString();
+
+  if (msg.type === 'status') {
+    updateStatus(msg.data);
+  } else if (msg.type === 'history') {
+    (msg.data || []).forEach(appendEvent);
+  } else if (msg.type === 'event') {
+    const ev = msg.data;
+    appendEvent(ev);
+    // Disparar refresh de trades
+    fetchTrades();
+  } else if (msg.type === 'trade_update') {
+    upsertTrade(msg.data);
+    renderOpen();
+    renderClosed();
+    renderStats();
+  }
+}
+
+function updateStatus(data) {
+  if (data.ws_binance_connected !== undefined) {
+    setDot('dot-ws-binance', data.ws_binance_connected ? 'green' : 'red');
+  }
+  if (data.balance_usdt !== undefined) {
+    setStat('s-balance', (+data.balance_usdt).toFixed(2) + ' USDT');
+  }
+  if (data.uptime_start) {
+    const el = document.getElementById('s-uptime');
+    el.textContent = new Date(data.uptime_start).toLocaleString('es-ES',
+      { dateStyle: 'short', timeStyle: 'short' });
+  }
+}
+
+function upsertTrade(t) {
+  const idx = trades.findIndex(x => x.trade_id === t.trade_id);
+  if (idx >= 0) trades[idx] = t;
+  else trades.push(t);
+}
+
+// ─────────────────────────────────────────────────────────
+// Carga inicial vía REST
+// ─────────────────────────────────────────────────────────
+
+async function fetchTrades() {
+  try {
+    const r = await fetch('/api/trades');
+    if (!r.ok) return;
+    trades = await r.json();
+    renderOpen();
+    renderClosed();
+    renderStats();
+  } catch(e) { console.error('fetchTrades', e); }
+}
+
+async function fetchStatus() {
+  try {
+    const r = await fetch('/api/status');
+    if (!r.ok) return;
+    updateStatus(await r.json());
+  } catch(e) {}
+}
+
+// ─────────────────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────────────────
+
+(async function init() {
+  await fetchTrades();
+  await fetchStatus();
+  connect();
+  // Fallback: refresh completo cada 30s si WS se desconecta
+  setInterval(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      fetchTrades();
+      fetchStatus();
+    }
+  }, 30000);
+  // Actualizar duraciones (elapsed) cada 10s
+  setInterval(() => {
+    renderOpen();
+  }, 10000);
+})();
+</script>
+</body>
+</html>
