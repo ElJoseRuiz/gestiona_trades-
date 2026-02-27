@@ -471,6 +471,11 @@ class TradeEngine:
                     )
                     order_id = int(result["orderId"])
 
+                    # 1. REGISTRO EN MEMORIA INMEDIATO (Previene Condición de Carrera)
+                    self._by_entry[order_id] = trade.trade_id
+                    self._ws_mgr.register_entry(order_id)
+
+                    # 2. ACTUALIZACIÓN Y PERSISTENCIA (I/O)
                     trade.entry_order_id = order_id
                     trade.entry_quantity = qty
                     trade.touch()
@@ -479,9 +484,6 @@ class TradeEngine:
                         "orderId": order_id, "priceMatch": price_match,
                         "qty": qty, "attempt": attempt,
                     })
-                    self._by_entry[order_id] = trade.trade_id
-                    self._ws_mgr.register_entry(order_id)
-
                     log.info(
                         f"Trade {trade.trade_id[:8]} OPENING attempt {attempt}: "
                         f"orderId={order_id} priceMatch={price_match} qty={qty}"
