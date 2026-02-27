@@ -139,12 +139,12 @@
       <table>
         <thead>
           <tr>
-            <th>Par</th><th>Estado</th><th>Entry Price</th>
+            <th>Par</th><th>Estado</th><th>Size USDT</th><th>Entry Price</th>
             <th>TP / Trigger</th><th>SL / Trigger</th>
             <th>PnL est. %</th><th>Tiempo</th><th>Señal top</th>
           </tr>
         </thead>
-        <tbody id="tbl-open"><tr><td class="no-data" colspan="8">Sin trades abiertos</td></tr></tbody>
+        <tbody id="tbl-open"><tr><td class="no-data" colspan="9">Sin trades abiertos</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -253,7 +253,7 @@ function renderOpen() {
 
   if (!open.length) {
     document.getElementById('tbl-open').innerHTML =
-      '<tr><td class="no-data" colspan="8">Sin trades abiertos</td></tr>';
+      '<tr><td class="no-data" colspan="9">Sin trades abiertos</td></tr>';
     return;
   }
 
@@ -261,9 +261,13 @@ function renderOpen() {
     const pnlEst = t.entry_price
       ? ((t.entry_price - t.entry_price * 0.85) / t.entry_price * 100).toFixed(2)
       : null;   // placeholder — sin precio live
+    const sizeUsdt = (t.entry_price && t.entry_quantity)
+      ? (+t.entry_price * +t.entry_quantity).toFixed(2)
+      : '—';
     return `<tr>
       <td><b>${t.pair}</b></td>
       <td>${badge(t.status)}</td>
+      <td>${sizeUsdt !== '—' ? sizeUsdt + ' $' : '—'}</td>
       <td>${fmtPrice(t.entry_price)}</td>
       <td>${fmtPrice(t.tp_price)} <span class="muted">(${fmtPrice(t.tp_trigger_price)})</span></td>
       <td>${fmtPrice(t.sl_price)} <span class="muted">(${fmtPrice(t.sl_trigger_price)})</span></td>
