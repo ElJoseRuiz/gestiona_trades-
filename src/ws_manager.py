@@ -180,27 +180,42 @@ class WSManager:
         if exec_type not in ("TRADE", "FILLED") or order_status != "FILLED":
             return
 
-        order_id = int(order.get("i", 0))
+        # 1. EXTRACCIÓN DE IDENTIFICADORES BIFURCADOS
+        order_id = int(order.get("i", 0))       # ID real de la orden ejecutada
+        algo_id  = int(order.get("A", 0))       # ID de la orden Algo padre (si aplica)
         log.info(
-            f"WS FILLED: orderId={order_id} symbol={order.get('s')} "
+            f"WS FILLED: orderId={order_id} algoId={algo_id} symbol={order.get('s')} "
             f"side={order.get('S')} qty={order.get('q')} price={order.get('ap')}"
         )
 
-        # Activar fill_event si hay uno registrado (Limit-Chase executor).
-        # Se hace ANTES del callback para que el executor pueda despertar y
-        # retornar; on_sl_fill cerrará el trade de forma independiente.
-        ev = self._fill_events.pop(order_id, None)
+        ev = self._fill_events.pop(order_id, self._fill_events.pop(algo_id, None))
         if ev is not None:
             ev.set()
 
+        # 2. MATCHING LOGIC (Verifica 'i' primero, luego 'A')
         if order_id in self._entry_orders:
             self._entry_orders.discard(order_id)
             await self._on_entry_fill(order)
+        elif algo_id in self._entry_orders:
+            self._entry_orders.discard(algo_id)
+            order["i"] = algo_id  # Inyectar para compatibilidad con trade_engine
+            await self._on_entry_fill(order)
+
         elif order_id in self._tp_orders:
             self._tp_orders.discard(order_id)
             await self._on_tp_fill(order)
+        elif algo_id in self._tp_orders:
+            self._tp_orders.discard(algo_id)
+            order["i"] = algo_id  # Enmascarar ID hijo con el ID padre conocido
+            await self._on_tp_fill(order)
+
         elif order_id in self._sl_orders:
             self._sl_orders.discard(order_id)
             await self._on_sl_fill(order)
+        elif algo_id in self._sl_orders:
+            self._sl_orders.discard(algo_id)
+            order["i"] = algo_id  # Enmascarar ID hijo con el ID padre conocido
+            await self._on_sl_fill(order)
+
         else:
-            log.debug(f"WS fill de orden no registrada: orderId={order_id}")
+            log.debug(f"WS fill de orden no registrada: orderId={order_id} algoId={algo_id}")
