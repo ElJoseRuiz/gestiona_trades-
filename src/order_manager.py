@@ -252,6 +252,23 @@ class OrderManager:
             log.debug(f"get_open_algo_orders({symbol}): {e}")
             return []
 
+    async def get_all_open_orders(self) -> list:
+        """Obtiene TODAS las órdenes regulares abiertas en la cuenta (sin filtro de símbolo)."""
+        return await self._get("/fapi/v1/openOrders", signed=True)
+
+    async def get_all_open_algo_orders(self) -> list:
+        """Obtiene TODAS las órdenes algo (condicionales) abiertas en la cuenta."""
+        try:
+            data = await self._get("/fapi/v1/openAlgoOrders", signed=True)
+            orders = data if isinstance(data, list) else data.get("orders", [])
+            for o in orders:
+                if "algoId" in o and "orderId" not in o:
+                    o["orderId"] = o["algoId"]
+            return orders
+        except BinanceError as e:
+            log.debug(f"get_all_open_algo_orders: {e}")
+            return []
+
     # ──────────────────────────────────────────────────────────────────
     # Quantity calculation
     # ──────────────────────────────────────────────────────────────────

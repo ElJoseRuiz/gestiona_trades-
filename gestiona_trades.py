@@ -108,13 +108,10 @@ class App:
             on_event  = self._on_event,
         )
 
-        # 4. Cargar trades activos y reconciliar (Cierra posiciones huérfanas en memoria)
+        # 4. Cargar trades activos y reconciliar (Llama SIEMPRE para limpiar huérfanos en Binance)
         active_trades = await self._db.load_active_trades()
-        if active_trades:
-            log.info(f"Cargados {len(active_trades)} trades activos de la DB")
-            await self._engine.reconcile(active_trades)
-        else:
-            log.info("Sin trades activos en DB")
+        log.info(f"Cargados {len(active_trades)} trades activos de la DB")
+        await self._engine.reconcile(active_trades)
 
         # 5. Configurar leverage + margin type SOLO para los pares que SIGUEN activos
         current_active = self._engine.get_active_trades()

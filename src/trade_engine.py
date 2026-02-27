@@ -136,10 +136,8 @@ class TradeEngine:
                 continue
 
             try:
-                active_trades = self.get_active_trades()
-                if active_trades:
-                    log.info("Iniciando reconciliación periódica (10 min)...")
-                    await self.reconcile(active_trades)
+                log.info("Iniciando reconciliación periódica (10 min)...")
+                await self.reconcile(self.get_active_trades())
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -147,26 +145,11 @@ class TradeEngine:
 
     async def reconcile(self, db_trades: list[Trade]):
         """
-        Reconciliación general. Para cada trade activo en la DB:
-
-          OPEN    – verifica que la posición exista en Binance; comprueba que
-                    las órdenes de TP y SL estén activas y las re-coloca si
-                    faltan.
-          OPENING – consulta el estado de la orden de entrada en Binance:
-                    si se llenó durante el apagado → promueve a OPEN y coloca
-                    TP/SL; en otro caso → NOT_EXECUTED.
-          CLOSING – si la posición ya desapareció de Binance → CLOSED;
-                    si sigue → restaura a OPEN y reconcilia TP/SL.
-
-        Además avisa de posiciones abiertas en Binance sin trade en DB.
+        Reconciliación general de estado y limpieza de huérfanos.
         """
-        if not db_trades:
-            log.info("Reconciliación: sin trades activos en DB")
-            return
+        log.info(f"Reconciliando {len(db_trades)} trades activos de la DB...")
 
-        log.info(f"Reconciliando {len(db_trades)} trades de la DB...")
-
-        # Obtener todas las posiciones Binance de una sola llamada
+        # 1. Obtener todas las posiciones Binance de una sola llamada
         try:
             all_positions = await self._order_mgr.get_all_positions()
             binance_pairs = {p["symbol"] for p in all_positions}
@@ -178,27 +161,26 @@ class TradeEngine:
             log.error(f"Reconciliación: no se pudieron obtener posiciones: {e}")
             binance_pairs = set()
 
-        db_open_pairs: set[str] = set()
+        db_open_pairs:    set[str] = set()
+        db_opening_pairs: set[str] = set()
 
+        # 2. Reconciliar estado de los trades activos en memoria
         for t in db_trades:
-            self._trades[t.trade_id] = t   # cargar en memoria siempre
+            self._trades[t.trade_id] = t
             try:
                 if t.status == TradeStatus.OPEN:
                     await self._reconcile_open(t, binance_pairs)
                     if t.status == TradeStatus.OPEN:
                         db_open_pairs.add(t.pair)
-
-                elif t.status in (TradeStatus.OPENING,
-                                  TradeStatus.SIGNAL_RECEIVED):
+                elif t.status in (TradeStatus.OPENING, TradeStatus.SIGNAL_RECEIVED):
+                    db_opening_pairs.add(t.pair)
                     await self._reconcile_opening(t, binance_pairs)
                     if t.status == TradeStatus.OPEN:
                         db_open_pairs.add(t.pair)
-
                 elif t.status == TradeStatus.CLOSING:
                     await self._reconcile_closing(t, binance_pairs)
                     if t.status == TradeStatus.OPEN:
                         db_open_pairs.add(t.pair)
-
                 log.info(
                     f"Reconciliación: trade {t.trade_id[:8]} ({t.pair}) "
                     f"→ {t.status.value}"
@@ -209,11 +191,50 @@ class TradeEngine:
                     exc_info=True
                 )
 
-        # Posiciones Binance sin trade en DB → aviso
         for pair in binance_pairs - db_open_pairs:
             log.warning(
                 f"Reconciliación: posición abierta en Binance para {pair} "
                 "sin trade correspondiente en DB → revisar manualmente"
+            )
+
+        # 3. Limpieza global de órdenes huérfanas en Binance
+        try:
+            all_open = await self._order_mgr.get_all_open_orders()
+            all_algo = await self._order_mgr.get_all_open_algo_orders()
+            all_orders = all_open + all_algo
+
+            # Un par es válido si tiene posición abierta O si el bot está
+            # intentando entrar ahora mismo (chase loop activo)
+            valid_pairs = binance_pairs.union(db_opening_pairs)
+
+            cleaned_count = 0
+            for o in all_orders:
+                sym = o.get("symbol")
+                oid = int(o.get("orderId"))
+
+                # Si la orden pertenece a un par sin posición abierta → huérfana
+                if sym not in valid_pairs:
+                    log.warning(
+                        f"Reconciliación: eliminando orden huérfana {oid} "
+                        f"en {sym} (posición cero)"
+                    )
+                    try:
+                        await self._order_mgr.cancel_order(sym, oid)
+                        cleaned_count += 1
+                    except Exception as e:
+                        log.error(
+                            f"Fallo al cancelar orden huérfana {oid} en {sym}: {e}"
+                        )
+
+            if cleaned_count > 0:
+                log.info(
+                    f"Reconciliación: {cleaned_count} órdenes huérfanas "
+                    "purgadas de Binance."
+                )
+        except Exception as e:
+            log.error(
+                f"Error durante la purga de órdenes huérfanas: {e}",
+                exc_info=True
             )
 
     async def _reconcile_open(self, t: Trade, binance_pairs: set):
