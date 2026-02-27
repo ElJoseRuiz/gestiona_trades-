@@ -42,7 +42,7 @@ class WSManager:
 
         self._listen_key:    Optional[str]  = None
         self._connected:     bool           = False
-        self._entry_orders:  set[int]       = set()   # order_ids de entry
+        self._entry_orders:  set            = set()   # order_ids (int) y client_ids (str) de entry
         self._tp_orders:     set[int]       = set()   # order_ids de TP
         self._sl_orders:     set[int]       = set()   # order_ids de SL
 
@@ -60,7 +60,8 @@ class WSManager:
     # Registro de órdenes a vigilar
     # ──────────────────────────────────────────────────────────────────
 
-    def register_entry(self, order_id: int):
+    def register_entry(self, order_id):
+        """Acepta int (orderId numérico) o str (newClientOrderId)."""
         self._entry_orders.add(order_id)
         log.debug(f"WS registrado entry orderId={order_id}")
 
@@ -79,6 +80,10 @@ class WSManager:
 
     def unregister_fill_event(self, order_id: int):
         self._fill_events.pop(order_id, None)
+
+    def unregister_client_id(self, client_id: str):
+        """Elimina un newClientOrderId del set de entradas vigiladas."""
+        self._entry_orders.discard(client_id)
 
     def unregister(self, order_id: int):
         self._entry_orders.discard(order_id)
@@ -174,48 +179,60 @@ class WSManager:
             return
 
         order = msg.get("o", {})
-        exec_type  = order.get("x")   # TRADE = fill
-        order_status = order.get("X") # FILLED, PARTIALLY_FILLED, ...
+        exec_type    = order.get("x")   # TRADE = fill
+        order_status = order.get("X")   # FILLED, PARTIALLY_FILLED, ...
 
         if exec_type not in ("TRADE", "FILLED") or order_status != "FILLED":
             return
 
-        # 1. EXTRACCIÓN DE IDENTIFICADORES BIFURCADOS
-        order_id = int(order.get("i", 0))       # ID real de la orden ejecutada
-        algo_id  = int(order.get("A", 0))       # ID de la orden Algo padre (si aplica)
+        # 1. EXTRACCIÓN GLOBAL DE IDENTIFICADORES
+        order_id  = int(order.get("i", 0))      # ID real de Binance
+        algo_id   = int(order.get("A", 0))      # ID Algo (para TP/SL)
+        client_id = order.get("c", "")          # Client ID (adelanta latencia REST)
         log.info(
-            f"WS FILLED: orderId={order_id} algoId={algo_id} symbol={order.get('s')} "
-            f"side={order.get('S')} qty={order.get('q')} price={order.get('ap')}"
+            f"WS FILLED: orderId={order_id} clientId={client_id} algoId={algo_id} "
+            f"symbol={order.get('s')} side={order.get('S')} qty={order.get('q')}"
         )
 
+        # 2. DESPERTAR EJECUTORES REST (si aplica)
         ev = self._fill_events.pop(order_id, self._fill_events.pop(algo_id, None))
         if ev is not None:
             ev.set()
 
-        # 2. MATCHING LOGIC (Verifica 'i' primero, luego 'A')
-        if order_id in self._entry_orders:
+        # 3. EMPAREJAMIENTO CON FIRE-AND-FORGET ASÍNCRONO
+        if client_id and client_id in self._entry_orders:
+            self._entry_orders.discard(client_id)
+            asyncio.create_task(self._on_entry_fill(order), name=f"entry_c_{client_id}")
+
+        elif order_id in self._entry_orders:
             self._entry_orders.discard(order_id)
-            await self._on_entry_fill(order)
+            asyncio.create_task(self._on_entry_fill(order), name=f"entry_id_{order_id}")
+
         elif algo_id in self._entry_orders:
             self._entry_orders.discard(algo_id)
-            order["i"] = algo_id  # Inyectar para compatibilidad con trade_engine
-            await self._on_entry_fill(order)
+            order["i"] = algo_id
+            asyncio.create_task(self._on_entry_fill(order), name=f"entry_a_{algo_id}")
 
         elif order_id in self._tp_orders:
             self._tp_orders.discard(order_id)
-            await self._on_tp_fill(order)
+            asyncio.create_task(self._on_tp_fill(order), name=f"tp_{order_id}")
+
         elif algo_id in self._tp_orders:
             self._tp_orders.discard(algo_id)
-            order["i"] = algo_id  # Enmascarar ID hijo con el ID padre conocido
-            await self._on_tp_fill(order)
+            order["i"] = algo_id
+            asyncio.create_task(self._on_tp_fill(order), name=f"tp_a_{algo_id}")
 
         elif order_id in self._sl_orders:
             self._sl_orders.discard(order_id)
-            await self._on_sl_fill(order)
+            asyncio.create_task(self._on_sl_fill(order), name=f"sl_{order_id}")
+
         elif algo_id in self._sl_orders:
             self._sl_orders.discard(algo_id)
-            order["i"] = algo_id  # Enmascarar ID hijo con el ID padre conocido
-            await self._on_sl_fill(order)
+            order["i"] = algo_id
+            asyncio.create_task(self._on_sl_fill(order), name=f"sl_a_{algo_id}")
 
         else:
-            log.debug(f"WS fill de orden no registrada: orderId={order_id} algoId={algo_id}")
+            log.debug(
+                f"WS fill de orden no registrada: "
+                f"orderId={order_id} algoId={algo_id} client={client_id}"
+            )

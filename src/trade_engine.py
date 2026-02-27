@@ -55,10 +55,11 @@ class TradeEngine:
 
         # Trades activos en memoria {trade_id: Trade}
         self._trades:      Dict[str, Trade] = {}
-        # Mapas rápidos para lookup por order_id
-        self._by_entry:    Dict[int, str]   = {}   # entry_order_id → trade_id
-        self._by_tp:       Dict[int, str]   = {}   # tp_order_id    → trade_id
-        self._by_sl:       Dict[int, str]   = {}   # sl_order_id    → trade_id
+        # Mapas rápidos para lookup por order_id y client_id
+        self._by_entry:      Dict[int, str]   = {}   # entry_order_id → trade_id
+        self._by_client_id:  Dict[str, str]   = {}   # newClientOrderId → trade_id
+        self._by_tp:         Dict[int, str]   = {}   # tp_order_id    → trade_id
+        self._by_sl:         Dict[int, str]   = {}   # sl_order_id    → trade_id
 
         self._timeout_task:   Optional[asyncio.Task] = None
         self._reconcile_task: Optional[asyncio.Task] = None
@@ -455,6 +456,7 @@ class TradeEngine:
         await self._db.save_trade(trade)
 
         cfg = self._cfg
+        _cur_client_oid = None   # rastrea el client_oid activo para limpieza en CancelledError
         try:
             for attempt in range(1, cfg.max_chase_attempts + 1):
                 try:
@@ -466,16 +468,25 @@ class TradeEngine:
                     # Chase     → BBO Counterparty 1 (mejor bid, máxima prioridad de fill)
                     price_match = "OPPONENT_5" if attempt == 1 else "OPPONENT"
 
+                    # Generar ID de cliente propio para neutralizar la latencia REST
+                    client_oid = f"ent_{trade.trade_id[:8]}_{attempt}"
+                    _cur_client_oid = client_oid
+
+                    # 1. REGISTRO PREVIO AL ENVÍO DE RED
+                    self._by_client_id[client_oid] = trade.trade_id
+                    self._ws_mgr.register_entry(client_oid)
+
                     result   = await self._order_mgr.open_short(
-                        sig.pair, qty, price_match=price_match
+                        sig.pair, qty, price_match=price_match,
+                        newClientOrderId=client_oid
                     )
                     order_id = int(result["orderId"])
 
-                    # 1. REGISTRO EN MEMORIA INMEDIATO (Previene Condición de Carrera)
+                    # 2. Respaldo numérico tradicional
                     self._by_entry[order_id] = trade.trade_id
                     self._ws_mgr.register_entry(order_id)
 
-                    # 2. ACTUALIZACIÓN Y PERSISTENCIA (I/O)
+                    # 3. ACTUALIZACIÓN Y PERSISTENCIA (I/O)
                     trade.entry_order_id = order_id
                     trade.entry_quantity = qty
                     trade.touch()
@@ -507,7 +518,9 @@ class TradeEngine:
                         # Si ya se llenó en la cancelación, lo captura el WS
                         log.warning(f"Cancel order {order_id}: {e}")
                     self._ws_mgr.unregister(order_id)
+                    self._ws_mgr.unregister_client_id(client_oid)
                     self._by_entry.pop(order_id, None)
+                    self._by_client_id.pop(client_oid, None)
 
                     if attempt < cfg.max_chase_attempts:
                         await asyncio.sleep(cfg.chase_interval_seconds)
@@ -529,9 +542,18 @@ class TradeEngine:
             # Agotados los intentos BBO/LIMIT → MARKET fallback si configurado
             if self._cfg.entry_market_fallback:
                 try:
-                    ref_price = await self._order_mgr.get_best_bid(sig.pair)
-                    qty       = await self._order_mgr.calc_quantity(sig.pair, ref_price)
-                    result    = await self._order_mgr.open_short_market(sig.pair, qty)
+                    ref_price  = await self._order_mgr.get_best_bid(sig.pair)
+                    qty        = await self._order_mgr.calc_quantity(sig.pair, ref_price)
+                    client_oid = f"mkt_{trade.trade_id[:8]}"
+                    _cur_client_oid = client_oid
+
+                    # Registro previo al envío de red
+                    self._by_client_id[client_oid] = trade.trade_id
+                    self._ws_mgr.register_entry(client_oid)
+
+                    result    = await self._order_mgr.open_short_market(
+                        sig.pair, qty, newClientOrderId=client_oid
+                    )
                     order_id  = int(result["orderId"])
                     trade.entry_order_id = order_id
                     trade.entry_quantity = qty
@@ -553,7 +575,9 @@ class TradeEngine:
                         f"Trade {trade.trade_id[:8]} MARKET fallback sin fill en 10s"
                     )
                     self._ws_mgr.unregister(order_id)
+                    self._ws_mgr.unregister_client_id(client_oid)
                     self._by_entry.pop(order_id, None)
+                    self._by_client_id.pop(client_oid, None)
                 except Exception as e:
                     log.error(
                         f"Trade {trade.trade_id[:8]} MARKET fallback error: {e}",
@@ -585,6 +609,9 @@ class TradeEngine:
                     pass
                 self._ws_mgr.unregister(trade.entry_order_id)
                 self._by_entry.pop(trade.entry_order_id, None)
+                if _cur_client_oid:
+                    self._ws_mgr.unregister_client_id(_cur_client_oid)
+                    self._by_client_id.pop(_cur_client_oid, None)
             trade.status = TradeStatus.NOT_EXECUTED
             trade.touch()
             try:
@@ -611,11 +638,25 @@ class TradeEngine:
     # ──────────────────────────────────────────────────────────────────
 
     async def on_entry_fill(self, order_data: dict):
-        order_id = int(order_data.get("i", 0))
-        trade_id = self._by_entry.pop(order_id, None)
+        order_id  = int(order_data.get("i", 0))
+        client_id = order_data.get("c", "")
+
+        # Verificar primero por nuestro ID garantizado, luego por numérico
+        trade_id = self._by_client_id.pop(client_id, None)
         if not trade_id:
-            log.warning(f"on_entry_fill: trade no encontrado para orderId={order_id}")
+            trade_id = self._by_entry.pop(order_id, None)
+
+        if not trade_id:
+            log.warning(
+                f"on_entry_fill: trade no encontrado para "
+                f"orderId={order_id} clientId={client_id}"
+            )
             return
+
+        # Limpiar residuos en ambos diccionarios
+        self._by_entry.pop(order_id, None)
+        self._by_client_id.pop(client_id, None)
+
         trade = self._trades.get(trade_id)
         if not trade:
             return

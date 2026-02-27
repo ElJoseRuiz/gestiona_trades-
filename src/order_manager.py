@@ -304,7 +304,8 @@ class OrderManager:
 
     async def open_short(self, symbol: str, quantity: float,
                          price: float = None,
-                         price_match: str = None) -> dict:
+                         price_match: str = None,
+                         newClientOrderId: str = None) -> dict:
         params = {
             "symbol":       symbol,
             "side":         "SELL",
@@ -312,6 +313,8 @@ class OrderManager:
             "type":         "LIMIT",
             "quantity":     str(quantity),
         }
+        if newClientOrderId:
+            params["newClientOrderId"] = newClientOrderId
         if price_match:
             params["timeInForce"] = "GTC"
             params["priceMatch"]  = price_match
@@ -327,7 +330,8 @@ class OrderManager:
         log.info(f"[ENTRY] orderId={result.get('orderId')} status={result.get('status')}")
         return result
 
-    async def open_short_market(self, symbol: str, quantity: float) -> dict:
+    async def open_short_market(self, symbol: str, quantity: float,
+                                newClientOrderId: str = None) -> dict:
         """SELL MARKET para abrir short. Fallback cuando BBO no llena."""
         params = {
             "symbol":       symbol,
@@ -336,6 +340,8 @@ class OrderManager:
             "type":         "MARKET",
             "quantity":     str(quantity),
         }
+        if newClientOrderId:
+            params["newClientOrderId"] = newClientOrderId
         log.info(f"[ENTRY_MARKET] open_short_market {symbol} qty={quantity}")
         result = await self._post("/fapi/v1/order", params)
         log.info(f"[ENTRY_MARKET] orderId={result.get('orderId')} status={result.get('status')}")
