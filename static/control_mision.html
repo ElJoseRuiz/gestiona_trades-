@@ -158,12 +158,12 @@
       <table>
         <thead>
           <tr>
-            <th>Par</th><th>Estado</th><th>Entry</th><th>Exit</th>
+            <th>Par</th><th>Estado</th><th>Size USDT</th><th>Entry</th><th>Exit</th>
             <th>PnL USDT</th><th>PnL %</th><th>Motivo</th>
             <th>Duración</th><th>Fees</th>
           </tr>
         </thead>
-        <tbody id="tbl-closed"><tr><td class="no-data" colspan="9">—</td></tr></tbody>
+        <tbody id="tbl-closed"><tr><td class="no-data" colspan="10">—</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -286,13 +286,18 @@ function renderClosed() {
 
   if (!closed.length) {
     document.getElementById('tbl-closed').innerHTML =
-      '<tr><td class="no-data" colspan="9">—</td></tr>';
+      '<tr><td class="no-data" colspan="10">—</td></tr>';
     return;
   }
 
-  document.getElementById('tbl-closed').innerHTML = closed.map(t => `<tr>
+  document.getElementById('tbl-closed').innerHTML = closed.map(t => {
+    const sizeUsdt = (t.entry_price && t.entry_quantity)
+      ? (+t.entry_price * +t.entry_quantity).toFixed(2)
+      : '—';
+    return `<tr>
     <td><b>${t.pair}</b></td>
     <td>${badge(t.status)}</td>
+    <td>${sizeUsdt !== '—' ? sizeUsdt + ' $' : '—'}</td>
     <td>${fmtPrice(t.entry_price)}</td>
     <td>${fmtPrice(t.exit_price)}</td>
     <td class="${pnlClass(t.pnl_usdt)}">${fmtUSDT(t.pnl_usdt)}</td>
@@ -300,7 +305,8 @@ function renderClosed() {
     <td>${exitIcon(t)}</td>
     <td>${duration(t)}</td>
     <td class="muted">${fmtFees(t.fees_usdt)}</td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
 }
 
 function renderStats() {
