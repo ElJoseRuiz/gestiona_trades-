@@ -85,6 +85,11 @@
   .etype-ws_connect,.etype-startup{color:#2dc653}
   .etype-ws_disconnect,.etype-shutdown{color:#e63946}
 
+  /* ── Config chips (estáticos) ── */
+  .cfg-chip{border-color:#252850;background:#161928}
+  .cfg-val-tp{color:#2dc653}
+  .cfg-val-sl{color:#e63946}
+
   /* ── Barra inferior ── */
   .footer{font-size:10px;color:#3a3d52;text-align:center;padding:8px}
 
@@ -127,6 +132,12 @@
     <div class="stat-chip"><span class="label">Trades hoy</span><span class="value" id="s-trades-today">—</span></div>
     <div class="stat-chip"><span class="label">Win Rate</span><span class="value" id="s-wr">—</span></div>
     <div class="stat-chip"><span class="label">Uptime desde</span><span class="value" id="s-uptime" style="font-size:11px">—</span></div>
+    <div style="width:1px;background:#2d3150;align-self:stretch;margin:0 4px"></div>
+    <div class="stat-chip cfg-chip"><span class="label">Capital/Trade</span><span class="value" id="cfg-capital" style="font-size:13px">—</span></div>
+    <div class="stat-chip cfg-chip"><span class="label">Max Trades</span><span class="value" id="cfg-max-open" style="font-size:13px">—</span></div>
+    <div class="stat-chip cfg-chip"><span class="label">Max/Par</span><span class="value" id="cfg-max-pair" style="font-size:13px">—</span></div>
+    <div class="stat-chip cfg-chip"><span class="label">TP %</span><span class="value cfg-val-tp" id="cfg-tp" style="font-size:13px">—</span></div>
+    <div class="stat-chip cfg-chip"><span class="label">SL %</span><span class="value cfg-val-sl" id="cfg-sl" style="font-size:13px">—</span></div>
   </div>
 
   <!-- Trades abiertos -->
@@ -476,6 +487,24 @@ async function fetchStatus() {
   } catch(e) {}
 }
 
+async function fetchConfig() {
+  try {
+    const r = await fetch('/api/config');
+    if (!r.ok) return;
+    const cfg = await r.json();
+    const s = cfg.strategy || {};
+    const setEl = (id, val) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = val != null ? val : '—';
+    };
+    setEl('cfg-capital',  s.capital_per_trade != null ? s.capital_per_trade + ' $' : '—');
+    setEl('cfg-max-open', s.max_open_trades  != null ? s.max_open_trades        : '—');
+    setEl('cfg-max-pair', s.max_trades_per_pair != null ? s.max_trades_per_pair : '—');
+    setEl('cfg-tp',       s.tp_pct != null ? s.tp_pct + '%' : '—');
+    setEl('cfg-sl',       s.sl_pct != null ? s.sl_pct + '%' : '—');
+  } catch(e) { console.error('fetchConfig', e); }
+}
+
 // ─────────────────────────────────────────────────────────
 // Init
 // ─────────────────────────────────────────────────────────
@@ -483,6 +512,7 @@ async function fetchStatus() {
 (async function init() {
   await fetchTrades();
   await fetchStatus();
+  await fetchConfig();
   connect();
   // Fallback: refresh completo cada 30s si WS se desconecta
   setInterval(() => {
