@@ -13,7 +13,7 @@ Secuencia de arranque:
     6. Inicializar TradeEngine y WSManager
     7. Reconciliar trades activos con el estado real en Binance
     8. Iniciar WebSocket User Data Stream
-    9. Iniciar TradeEngine (timeout checker)
+    9. Iniciar TradeEngine (timeout checker y reconcile checker)
     10. Iniciar SignalWatcher
     11. Iniciar Dashboard
     12. Esperar SIGINT/SIGTERM → graceful shutdown
@@ -108,7 +108,7 @@ class App:
             on_event  = self._on_event,
         )
 
-        # 4. Cargar trades activos y reconciliar
+        # 4. Cargar trades activos y reconciliar (Cierra posiciones huérfanas en memoria)
         active_trades = await self._db.load_active_trades()
         if active_trades:
             log.info(f"Cargados {len(active_trades)} trades activos de la DB")
@@ -116,10 +116,11 @@ class App:
         else:
             log.info("Sin trades activos en DB")
 
-        # 5. Configurar leverage + margin type para los pares con trades abiertos
-        if active_trades:
+        # 5. Configurar leverage + margin type SOLO para los pares que SIGUEN activos
+        current_active = self._engine.get_active_trades()
+        if current_active:
             pairs_seen = set()
-            for t in active_trades:
+            for t in current_active:
                 if t.pair not in pairs_seen:
                     await self._setup_pair(t.pair)
                     pairs_seen.add(t.pair)
@@ -127,7 +128,7 @@ class App:
         # 6. Iniciar WSManager
         await self._ws_mgr.start()
 
-        # 7. Iniciar TradeEngine (timeout checker)
+        # 7. Iniciar TradeEngine (timeout checker y reconciliador)
         await self._engine.start()
 
         # 8. Iniciar SignalWatcher
@@ -180,8 +181,9 @@ class App:
         try:
             await self._om.set_margin_type(pair, "ISOLATED")
         except BinanceError as e:
-            # -4046: "No need to change margin type" → ya está en ISOLATED
-            if "-4046" in str(e):
+            # -4046: No need to change margin type (ya es ISOLATED)
+            # -4067: Position side cannot be changed if there exists open orders
+            if "-4046" in str(e) or "-4067" in str(e):
                 pass
             else:
                 log.warning(f"set_margin_type({pair}): {e}")

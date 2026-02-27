@@ -60,8 +60,9 @@ class TradeEngine:
         self._by_tp:       Dict[int, str]   = {}   # tp_order_id    → trade_id
         self._by_sl:       Dict[int, str]   = {}   # sl_order_id    → trade_id
 
-        self._timeout_task: Optional[asyncio.Task] = None
-        self._open_tasks:   set = set()   # tareas _open_trade en curso
+        self._timeout_task:   Optional[asyncio.Task] = None
+        self._reconcile_task: Optional[asyncio.Task] = None
+        self._open_tasks:     set = set()   # tareas _open_trade en curso
 
     # ──────────────────────────────────────────────────────────────────
     # Arranque / Parada
@@ -71,6 +72,9 @@ class TradeEngine:
         self._timeout_task = asyncio.create_task(
             self._timeout_loop(), name="timeout_checker"
         )
+        self._reconcile_task = asyncio.create_task(
+            self._reconcile_loop(), name="reconcile_checker"
+        )
         log.info("TradeEngine iniciado")
 
     async def stop(self):
@@ -78,6 +82,13 @@ class TradeEngine:
             self._timeout_task.cancel()
             try:
                 await self._timeout_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._reconcile_task:
+            self._reconcile_task.cancel()
+            try:
+                await self._reconcile_task
             except asyncio.CancelledError:
                 pass
 
@@ -112,12 +123,31 @@ class TradeEngine:
                                     TradeStatus.ERROR)]
 
     # ──────────────────────────────────────────────────────────────────
-    # Reconciliación al arrancar
+    # Reconciliación
     # ──────────────────────────────────────────────────────────────────
+
+    async def _reconcile_loop(self):
+        """Ejecuta una reconciliación periódica cada 10 minutos (600s)."""
+        while True:
+            await asyncio.sleep(600)
+
+            # Validación: No interrumpir si hay tareas de entrada (chase loop)
+            if self._open_tasks:
+                continue
+
+            try:
+                active_trades = self.get_active_trades()
+                if active_trades:
+                    log.info("Iniciando reconciliación periódica (10 min)...")
+                    await self.reconcile(active_trades)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.error(f"Error en reconcile_loop: {e}", exc_info=True)
 
     async def reconcile(self, db_trades: list[Trade]):
         """
-        Reconciliación al arrancar. Para cada trade activo en la DB:
+        Reconciliación general. Para cada trade activo en la DB:
 
           OPEN    – verifica que la posición exista en Binance; comprueba que
                     las órdenes de TP y SL estén activas y las re-coloca si
@@ -192,8 +222,14 @@ class TradeEngine:
             log.warning(
                 f"Reconciliación: trade {t.trade_id[:8]} ({t.pair}) "
                 "OPEN en DB pero sin posición en Binance "
-                "→ CLOSED (cerrado externamente)"
+                "→ Cancelando TP/SL huérfanos y marcando CLOSED"
             )
+
+            # --- LIMPIEZA ACTIVA DE ÓRDENES CONDICIONALES ---
+            await self._cancel_counterpart(t, "tp")
+            await self._cancel_counterpart(t, "sl")
+            # ------------------------------------------------
+
             t.status   = TradeStatus.CLOSED
             t.exit_type = ExitType.MANUAL.value
             t.touch()
