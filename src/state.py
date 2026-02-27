@@ -45,7 +45,9 @@ CREATE TABLE IF NOT EXISTS trades (
     status              TEXT NOT NULL,
     error_message       TEXT,
     created_at          TEXT NOT NULL,
-    updated_at          TEXT NOT NULL
+    updated_at          TEXT NOT NULL,
+    timeout_triggered   INTEGER NOT NULL DEFAULT 0,
+    reconciled          INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -88,21 +90,39 @@ class StateDB:
     # Trades
     # ──────────────────────────────────────────────────────────────────
 
-    async def save_trade(self, t: Trade):
+    async def save_trade(self, trade: Trade):
         sql = """
-        INSERT OR REPLACE INTO trades
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT OR REPLACE INTO trades (
+                trade_id, pair, status, signal_ts,
+                entry_order_id, entry_quantity, entry_price, entry_fill_ts,
+                tp_order_id, tp_trigger_price, tp_price,
+                sl_order_id, sl_trigger_price,
+                exit_price, exit_fill_ts, exit_type,
+                pnl_pct, pnl_usdt, fees_usdt,
+                error_message, signal_data,
+                created_at, updated_at, timeout_triggered, reconciled
+            ) VALUES (
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?,
+                ?, ?, ?,
+                ?, ?, ?,
+                ?, ?,
+                ?, ?, ?, ?
+            )
         """
         await self._db.execute(sql, (
-            t.trade_id, t.pair, t.signal_ts,
-            json.dumps(t.signal_data),
-            t.entry_order_id, t.entry_price, t.entry_quantity, t.entry_fill_ts,
-            t.tp_order_id, t.sl_order_id,
-            t.tp_price, t.sl_price, t.tp_trigger_price, t.sl_trigger_price,
-            t.exit_price, t.exit_fill_ts, t.exit_type,
-            t.pnl_usdt, t.pnl_pct, t.fees_usdt,
-            t.status.value, t.error_message,
-            t.created_at, t.updated_at,
+            trade.trade_id, trade.pair, trade.status.value, trade.signal_ts,
+            trade.entry_order_id, trade.entry_quantity, trade.entry_price, trade.entry_fill_ts,
+            trade.tp_order_id, trade.tp_trigger_price, trade.tp_price,
+            trade.sl_order_id, trade.sl_trigger_price,
+            trade.exit_price, trade.exit_fill_ts, trade.exit_type,
+            trade.pnl_pct, trade.pnl_usdt, trade.fees_usdt,
+            trade.error_message, json.dumps(trade.signal_data),
+            trade.created_at, trade.updated_at,
+            1 if trade.timeout_triggered else 0,
+            1 if getattr(trade, 'reconciled', False) else 0
         ))
         await self._db.commit()
 
@@ -207,10 +227,12 @@ def _row_to_trade(row) -> Trade:
         pnl_usdt         = r["pnl_usdt"],
         pnl_pct          = r["pnl_pct"],
         fees_usdt        = r["fees_usdt"],
-        status           = TradeStatus(r["status"]),
-        error_message    = r["error_message"],
-        created_at       = r["created_at"],
-        updated_at       = r["updated_at"],
+        status             = TradeStatus(r["status"]),
+        error_message      = r["error_message"],
+        created_at         = r["created_at"],
+        updated_at         = r["updated_at"],
+        timeout_triggered  = bool(r["timeout_triggered"]) if r["timeout_triggered"] is not None else False,
+        reconciled         = bool(r["reconciled"]) if r["reconciled"] is not None else False,
     )
 
 

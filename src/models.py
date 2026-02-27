@@ -108,6 +108,8 @@ class Trade:
     error_message:     Optional[str]  = None
     created_at:        str            = field(default_factory=_now_iso)
     updated_at:        str            = field(default_factory=_now_iso)
+    timeout_triggered: bool           = False
+    reconciled:        bool           = False
 
     def touch(self):
         self.updated_at = _now_iso()
