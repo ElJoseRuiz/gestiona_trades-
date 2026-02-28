@@ -686,6 +686,13 @@ class TradeEngine:
         await self._place_one_sl(trade)
 
     async def _place_one_tp(self, trade: Trade):
+        """
+        Coloca TAKE_PROFIT Algo (algoType=CONDITIONAL, priceMatch=OPPONENT)
+        en Binance.
+
+        Si Binance responde -2021 (el precio ya alcanzó el trigger) el trade
+        se cierra inmediatamente con una orden MARKET (beneficio asegurado).
+        """
         try:
             tp_result = await self._order_mgr.place_tp(
                 trade.pair, trade.entry_quantity, trade.entry_price
@@ -708,6 +715,42 @@ class TradeEngine:
                 f"Trade {trade.trade_id[:8]} TP colocado (Algo TAKE_PROFIT): "
                 f"algoId={tp_oid} stopPrice={trade.tp_trigger_price}"
             )
+        except BinanceError as e:
+            if e.code == -2021:
+                # El precio ya alcanzó el TP → cerrar posición inmediatamente
+                log.warning(
+                    f"Trade {trade.trade_id[:8]} {trade.pair}: TP superado "
+                    f"(triggerPrice ya cruzado) → cerrando con MARKET"
+                )
+                try:
+                    result = await self._order_mgr.close_position_market(
+                        trade.pair, trade.entry_quantity
+                    )
+                    exit_price = float(result.get("avgPrice") or 0)
+                    if not exit_price:
+                        exit_price = float(result.get("price") or 0)
+                    if not exit_price:
+                        log.warning(
+                            f"Trade {trade.trade_id[:8]} {trade.pair}: "
+                            f"avgPrice=0 en respuesta MARKET, PnL no calculable"
+                        )
+                    trade.status       = TradeStatus.CLOSING
+                    trade.exit_price   = exit_price
+                    trade.exit_fill_ts = datetime.now(timezone.utc).isoformat()
+                    trade.exit_type    = ExitType.TP.value
+                    await self._cancel_counterpart(trade, "sl")
+                    await self._close_trade(trade)
+                except Exception as close_err:
+                    log.error(
+                        f"Trade {trade.trade_id[:8]} error cerrando MARKET tras TP -2021: "
+                        f"{close_err}", exc_info=True
+                    )
+                    await self._emit(EventType.ERROR, trade.trade_id,
+                                     {"msg": f"TP -2021 close error: {close_err}"})
+            else:
+                log.error(f"Error colocando TP {trade.pair}: {e}", exc_info=True)
+                await self._emit(EventType.ERROR, trade.trade_id,
+                                 {"msg": f"TP error: {e}"})
         except Exception as e:
             log.error(f"Error colocando TP {trade.pair}: {e}", exc_info=True)
             await self._emit(EventType.ERROR, trade.trade_id, {"msg": f"TP error: {e}"})
