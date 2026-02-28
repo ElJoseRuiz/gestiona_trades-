@@ -708,6 +708,32 @@ class TradeEngine:
                 f"Trade {trade.trade_id[:8]} TP colocado (Algo TAKE_PROFIT): "
                 f"algoId={tp_oid} stopPrice={trade.tp_trigger_price}"
             )
+        except BinanceError as e:
+            if e.code == -2021:
+                # El precio ya cruzó el TP mientras el bot estaba apagado/desincronizado.
+                # Como es TP (ganancia), y Binance opera en neto, el mercado ya cerró esta porción de liquidez.
+                log.warning(
+                    f"Trade {trade.trade_id[:8]} {trade.pair}: TP superado (-2021) "
+                    f"durante reconciliación/apagado → Marcando trade como cerrado (TP)."
+                )
+                trade.status       = TradeStatus.CLOSING
+                # Asumimos el precio de trigger como precio de salida estimado para PnL local
+                trade.exit_price   = trade.tp_trigger_price if trade.tp_trigger_price else (trade.entry_price * (1 - self._cfg.tp_pct / 100))
+                trade.exit_fill_ts = datetime.now(timezone.utc).isoformat()
+                trade.exit_type    = ExitType.TP.value
+
+                # Intentamos cerrar la porción correspondiente a mercado por seguridad,
+                # aunque si el TP real se ejecutó en Binance, la posición neta ya se redujo.
+                try:
+                    await self._order_mgr.close_position_market(trade.pair, trade.entry_quantity)
+                except Exception as close_err:
+                    log.debug(f"Trade {trade.trade_id[:8]} aviso cierre MARKET post-TP: {close_err}")
+
+                await self._cancel_counterpart(trade, "sl")
+                await self._close_trade(trade)
+            else:
+                log.error(f"Error colocando TP {trade.pair}: {e}", exc_info=True)
+                await self._emit(EventType.ERROR, trade.trade_id, {"msg": f"TP error: {e}"})
         except Exception as e:
             log.error(f"Error colocando TP {trade.pair}: {e}", exc_info=True)
             await self._emit(EventType.ERROR, trade.trade_id, {"msg": f"TP error: {e}"})
