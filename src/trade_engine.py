@@ -690,12 +690,8 @@ class TradeEngine:
         Coloca TAKE_PROFIT Algo (algoType=CONDITIONAL, priceMatch=OPPONENT)
         en Binance.
 
-        Si Binance responde -2021 (el precio ya cruzó el trigger) consulta
-        la posición real para distinguir dos casos:
-          A) La posición de este trade ya se cerró (TP ejecutado mientras el bot
-             estaba parado) → marcar CLOSED sin nueva orden MARKET.
-          B) La posición sigue abierta y el precio acaba de cruzar el TP →
-             cerrar con MARKET para asegurar el beneficio.
+        Si Binance responde -2021 (el precio ya alcanzó el trigger) el trade
+        se cierra inmediatamente con una orden MARKET (beneficio asegurado).
         """
         try:
             tp_result = await self._order_mgr.place_tp(
@@ -721,7 +717,36 @@ class TradeEngine:
             )
         except BinanceError as e:
             if e.code == -2021:
-                await self._handle_tp_already_triggered(trade)
+                # El precio ya alcanzó el TP → cerrar posición inmediatamente
+                log.warning(
+                    f"Trade {trade.trade_id[:8]} {trade.pair}: TP superado "
+                    f"(triggerPrice ya cruzado) → cerrando con MARKET"
+                )
+                try:
+                    result = await self._order_mgr.close_position_market(
+                        trade.pair, trade.entry_quantity
+                    )
+                    exit_price = float(result.get("avgPrice") or 0)
+                    if not exit_price:
+                        exit_price = float(result.get("price") or 0)
+                    if not exit_price:
+                        log.warning(
+                            f"Trade {trade.trade_id[:8]} {trade.pair}: "
+                            f"avgPrice=0 en respuesta MARKET, PnL no calculable"
+                        )
+                    trade.status       = TradeStatus.CLOSING
+                    trade.exit_price   = exit_price
+                    trade.exit_fill_ts = datetime.now(timezone.utc).isoformat()
+                    trade.exit_type    = ExitType.TP.value
+                    await self._cancel_counterpart(trade, "sl")
+                    await self._close_trade(trade)
+                except Exception as close_err:
+                    log.error(
+                        f"Trade {trade.trade_id[:8]} error cerrando MARKET tras TP -2021: "
+                        f"{close_err}", exc_info=True
+                    )
+                    await self._emit(EventType.ERROR, trade.trade_id,
+                                     {"msg": f"TP -2021 close error: {close_err}"})
             else:
                 log.error(f"Error colocando TP {trade.pair}: {e}", exc_info=True)
                 await self._emit(EventType.ERROR, trade.trade_id,
@@ -729,79 +754,6 @@ class TradeEngine:
         except Exception as e:
             log.error(f"Error colocando TP {trade.pair}: {e}", exc_info=True)
             await self._emit(EventType.ERROR, trade.trade_id, {"msg": f"TP error: {e}"})
-
-    async def _handle_tp_already_triggered(self, trade: Trade):
-        """
-        El TP no se pudo colocar con -2021 (precio ya en zona de beneficio).
-        Compara la posición real en Binance con la cantidad acumulada de los
-        otros trades OPEN del mismo par para decidir:
-          - Si pos_real ≤ otros_trades → el TP de este trade ya se ejecutó
-            mientras el bot estaba parado → cerrar internamente como TP.
-          - Si pos_real > otros_trades → la posición sigue abierta y el precio
-            acaba de cruzar el trigger → cerrar con MARKET.
-        """
-        try:
-            position   = await self._order_mgr.get_position(trade.pair)
-            actual_qty = abs(float(position.get("positionAmt", 0))) if position else 0.0
-
-            # Cantidad esperada del resto de trades OPEN en memoria (excluye éste)
-            other_qty = sum(
-                t.entry_quantity
-                for t in self._trades.values()
-                if t.pair == trade.pair
-                and t.trade_id != trade.trade_id
-                and t.status == TradeStatus.OPEN
-            )
-
-            # Tolerancia del 5 % para redondeos y fees de ejecución
-            tolerance = trade.entry_quantity * 0.05
-
-            if actual_qty <= other_qty + tolerance:
-                # Caso A: la posición ya fue cerrada (TP ejecutado durante el apagado)
-                exit_price = trade.tp_trigger_price or await self._order_mgr.get_mark_price(trade.pair)
-                log.warning(
-                    f"Trade {trade.trade_id[:8]} {trade.pair}: TP inferido como "
-                    f"ejecutado durante apagado "
-                    f"(pos_real={actual_qty:.6f} ≤ otros={other_qty:.6f}+tol) "
-                    f"→ CLOSED exit≈{exit_price}"
-                )
-                trade.status       = TradeStatus.CLOSING
-                trade.exit_price   = exit_price
-                trade.exit_fill_ts = datetime.now(timezone.utc).isoformat()
-                trade.exit_type    = ExitType.TP.value
-                await self._cancel_counterpart(trade, "sl")
-                await self._close_trade(trade)
-            else:
-                # Caso B: posición aún abierta, cerrar con MARKET
-                log.warning(
-                    f"Trade {trade.trade_id[:8]} {trade.pair}: TP superado, "
-                    f"posición aún abierta "
-                    f"(pos_real={actual_qty:.6f} > otros={other_qty:.6f}+tol) "
-                    f"→ cerrando con MARKET"
-                )
-                result     = await self._order_mgr.close_position_market(
-                    trade.pair, trade.entry_quantity
-                )
-                exit_price = float(result.get("avgPrice") or result.get("price") or 0)
-                if not exit_price:
-                    log.warning(
-                        f"Trade {trade.trade_id[:8]} {trade.pair}: "
-                        f"avgPrice=0 en respuesta MARKET, PnL no calculable"
-                    )
-                trade.status       = TradeStatus.CLOSING
-                trade.exit_price   = exit_price
-                trade.exit_fill_ts = datetime.now(timezone.utc).isoformat()
-                trade.exit_type    = ExitType.TP.value
-                await self._cancel_counterpart(trade, "sl")
-                await self._close_trade(trade)
-
-        except Exception as err:
-            log.error(
-                f"Trade {trade.trade_id[:8]} error en _handle_tp_already_triggered: "
-                f"{err}", exc_info=True
-            )
-            await self._emit(EventType.ERROR, trade.trade_id,
-                             {"msg": f"TP -2021 recovery error: {err}"})
 
     async def _place_one_sl(self, trade: Trade):
         """
