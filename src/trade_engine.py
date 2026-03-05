@@ -731,6 +731,13 @@ class TradeEngine:
 
                 await self._cancel_counterpart(trade, "sl")
                 await self._close_trade(trade)
+
+                # --- Cierre en cascada (-2021 TP) ---
+                if self._cfg.tp_posicion:
+                    asyncio.create_task(
+                        self._close_sibling_trades(trade.pair, "TP", trade.trade_id),
+                        name=f"cascade_tp21_{trade.trade_id[:8]}"
+                    )
             else:
                 log.error(f"Error colocando TP {trade.pair}: {e}", exc_info=True)
                 await self._emit(EventType.ERROR, trade.trade_id, {"msg": f"TP error: {e}"})
@@ -791,6 +798,13 @@ class TradeEngine:
                     trade.exit_type    = ExitType.SL.value
                     await self._cancel_counterpart(trade, "tp")
                     await self._close_trade(trade)
+
+                    # --- Cierre en cascada (-2021 SL) ---
+                    if self._cfg.sl_posicion:
+                        asyncio.create_task(
+                            self._close_sibling_trades(trade.pair, "SL", trade.trade_id),
+                            name=f"cascade_sl21_{trade.trade_id[:8]}"
+                        )
                 except Exception as close_err:
                     log.error(
                         f"Trade {trade.trade_id[:8]} error cerrando MARKET tras -2021: "
@@ -832,6 +846,13 @@ class TradeEngine:
         await self._cancel_counterpart(trade, "sl")
         await self._close_trade(trade)
 
+        # --- Cierre en cascada ---
+        if self._cfg.tp_posicion:
+            asyncio.create_task(
+                self._close_sibling_trades(trade.pair, "TP", trade.trade_id),
+                name=f"cascade_tp_{trade.trade_id[:8]}"
+            )
+
     async def on_sl_fill(self, order_data: dict):
         """Callback WS: fill del SL Algo (STOP_MARKET) colocado en Binance."""
         order_id = int(order_data.get("i", 0))
@@ -857,6 +878,13 @@ class TradeEngine:
         # Cancelar TP que quedó pendiente
         await self._cancel_counterpart(trade, "tp")
         await self._close_trade(trade)
+
+        # --- Cierre en cascada ---
+        if self._cfg.sl_posicion:
+            asyncio.create_task(
+                self._close_sibling_trades(trade.pair, "SL", trade.trade_id),
+                name=f"cascade_sl_{trade.trade_id[:8]}"
+            )
 
     async def _cancel_counterpart(self, trade: Trade, side: str):
         """Cancela la orden TP o SL en Binance (regular o algo)."""
@@ -905,6 +933,45 @@ class TradeEngine:
             f"{trade.pair} PnL={sign}{pnl_u:.4f} USDT "
             f"({sign}{pnl_p:.2f}%)"
         )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Cierre en cascada posicional
+    # ──────────────────────────────────────────────────────────────────
+
+    async def _close_sibling_trades(self, pair: str, trigger_type: str, exclude_trade_id: str):
+        """Busca trades hermanos del mismo par y los cierra a mercado (Cascada posicional)."""
+        siblings = [
+            t for t in self._trades.values()
+            if t.pair == pair and t.status == TradeStatus.OPEN and t.trade_id != exclude_trade_id
+        ]
+
+        if not siblings:
+            return
+
+        log.info(f"Cierre en cascada ({trigger_type}_posicion=True) para {len(siblings)} trades de {pair}")
+
+        for t in siblings:
+            t.status = TradeStatus.CLOSING
+            t.touch()
+            await self._db.save_trade(t)
+
+            await self._cancel_counterpart(t, "tp")
+            await self._cancel_counterpart(t, "sl")
+
+            try:
+                result = await self._order_mgr.close_position_market(t.pair, t.entry_quantity)
+                exit_price = float(result.get("avgPrice") or result.get("price") or 0)
+
+                t.exit_price   = exit_price
+                t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
+                t.exit_type    = f"{trigger_type}_CASCADE"
+                await self._close_trade(t)
+            except Exception as e:
+                log.error(f"Error cerrando en cascada trade {t.trade_id[:8]}: {e}", exc_info=True)
+                t.status        = TradeStatus.ERROR
+                t.error_message = f"Cascade close error: {e}"
+                t.touch()
+                await self._db.save_trade(t)
 
     # ──────────────────────────────────────────────────────────────────
     # Timeout checker
