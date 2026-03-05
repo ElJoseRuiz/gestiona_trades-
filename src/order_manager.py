@@ -388,40 +388,37 @@ class OrderManager:
     async def place_tp(self, symbol: str, quantity: float,
                        entry_price: float) -> dict:
         """
-        TAKE_PROFIT CONDITIONAL (algo) con BBO — TP para SHORT.
-        Cuando mark_price <= stopPrice, Binance ejecuta al mejor ask (BBO).
-        La orden vive en Binance aunque el proceso se reinicie.
-          triggerPrice = entry * (1 - tp_pct/100)
+        LIMIT GTX (Post-Only / Maker garantizado) — TP para SHORT.
+        Coloca una orden LIMIT reduceOnly al precio objetivo calculado.
+        GTX garantiza que la orden sea Maker; si ya cruzó el precio,
+        Binance la rechaza con -2010 (manejado en trade_engine).
+          limit_price = entry * (1 - tp_pct/100)
         """
-        info         = await self.get_exchange_info(symbol)
-        tp_trigger   = entry_price * (1 - self._cfg.tp_pct / 100)
-        tp_trigger_r = _round_price(tp_trigger, info["tick_size"])
-        price_match  = self._cfg.sl_price_match or "OPPONENT"
+        info        = await self.get_exchange_info(symbol)
+        tick_size   = info["tick_size"]
+
+        target_price = entry_price * (1 - self._cfg.tp_pct / 100.0)
+        limit_price  = _round_price(target_price, tick_size)
 
         params = {
             "symbol":       symbol,
             "side":         "BUY",
             "positionSide": "BOTH",
-            "type":         "TAKE_PROFIT",
-            "algoType":     "CONDITIONAL",
+            "type":         "LIMIT",
+            "timeInForce":  "GTX",
             "quantity":     str(quantity),
-            "triggerPrice": str(tp_trigger_r),
-            "priceMatch":   price_match,
-            "timeInForce":  "GTC",
-            "workingType":  "MARK_PRICE",
+            "price":        str(limit_price),
             "reduceOnly":   "true",
-            "priceProtect": "true",
         }
-        log.info(f"[TP] place_tp {symbol} entry={entry_price} "
-                 f"triggerPrice={tp_trigger_r} priceMatch={price_match}")
 
-        result = await self._post("/fapi/v1/algoOrder", params)
-        if "algoId" in result and "orderId" not in result:
-            result["orderId"] = result["algoId"]
+        log.info(f"[TP_MAKER] place_tp_limit {symbol} entry={entry_price} limitPrice={limit_price}")
+        result = await self._post("/fapi/v1/order", params)
 
-        log.info(f"[TP] algoId={result.get('algoId', result.get('orderId'))} "
-                 f"triggerPrice={tp_trigger_r}")
-        return result
+        # Compatibilidad con trade_engine: triggerPrice = limit_price
+        return {
+            "orderId":      result["orderId"],
+            "triggerPrice": limit_price,
+        }
 
     async def place_sl(self, symbol: str, quantity: float,
                        entry_price: float) -> dict:

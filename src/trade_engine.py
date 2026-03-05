@@ -709,8 +709,9 @@ class TradeEngine:
                 f"algoId={tp_oid} stopPrice={trade.tp_trigger_price}"
             )
         except BinanceError as e:
-            if e.code == -2021:
+            if e.code in (-2021, -2010):
                 # El precio ya cruzó el TP mientras el bot estaba apagado/desincronizado.
+                # -2021: precio cruzado en algos; -2010: LIMIT GTX rechazado porque ya cruzó.
                 # Como es TP (ganancia), y Binance opera en neto, el mercado ya cerró esta porción de liquidez.
                 log.warning(
                     f"Trade {trade.trade_id[:8]} {trade.pair}: TP superado (-2021) "
