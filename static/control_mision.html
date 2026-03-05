@@ -152,10 +152,10 @@
           <tr>
             <th>Par</th><th>Estado</th><th>Size USDT</th><th>Entry Price</th>
             <th>TP / Trigger</th><th>SL / Trigger</th>
-            <th>PnL est. %</th><th>Tiempo</th><th>Señal top</th>
+            <th>PnL est. %</th><th>Tiempo</th><th>Señal top</th><th>Categoría</th>
           </tr>
         </thead>
-        <tbody id="tbl-open"><tr><td class="no-data" colspan="9">Sin trades abiertos</td></tr></tbody>
+        <tbody id="tbl-open"><tr><td class="no-data" colspan="10">Sin trades abiertos</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -171,10 +171,10 @@
           <tr>
             <th>Par</th><th>Estado</th><th>Size USDT</th><th>Entry</th><th>Exit</th>
             <th>PnL USDT</th><th>PnL %</th><th>Motivo</th>
-            <th>Duración</th><th>Fees</th>
+            <th>Duración</th><th>Fees</th><th>Señal top</th><th>Categoría</th>
           </tr>
         </thead>
-        <tbody id="tbl-closed"><tr><td class="no-data" colspan="10">—</td></tr></tbody>
+        <tbody id="tbl-closed"><tr><td class="no-data" colspan="12">—</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -269,7 +269,7 @@ function renderOpen() {
 
   if (!open.length) {
     document.getElementById('tbl-open').innerHTML =
-      '<tr><td class="no-data" colspan="9">Sin trades abiertos</td></tr>';
+      '<tr><td class="no-data" colspan="10">Sin trades abiertos</td></tr>';
     return;
   }
 
@@ -290,6 +290,7 @@ function renderOpen() {
       <td class="${pnlClass(t.pnl_pct)}">${fmtPct(t.pnl_pct)}</td>
       <td>${elapsed(t.entry_fill_ts || t.created_at)}</td>
       <td class="muted">${t.signal_data?.top || '—'}</td>
+      <td class="muted">${t.signal_data?.categoria || '—'}</td>
     </tr>`;
   }).join('');
 }
@@ -302,7 +303,7 @@ function renderClosed() {
 
   if (!closed.length) {
     document.getElementById('tbl-closed').innerHTML =
-      '<tr><td class="no-data" colspan="10">—</td></tr>';
+      '<tr><td class="no-data" colspan="12">—</td></tr>';
     return;
   }
 
@@ -321,6 +322,8 @@ function renderClosed() {
     <td>${exitIcon(t)}</td>
     <td>${duration(t)}</td>
     <td class="muted">${fmtFees(t.fees_usdt)}</td>
+    <td class="muted">${t.signal_data?.top || '—'}</td>
+    <td class="muted">${t.signal_data?.categoria || '—'}</td>
   </tr>`;
   }).join('');
 }
