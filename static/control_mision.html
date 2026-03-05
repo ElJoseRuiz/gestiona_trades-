@@ -197,9 +197,14 @@
 // ─────────────────────────────────────────────────────────
 // Estado global
 // ─────────────────────────────────────────────────────────
-let trades  = [];   // todos los trades recibidos
-let ws      = null;
-let wsRetry = 1000;
+let trades     = [];   // todos los trades recibidos
+let ws         = null;
+let wsRetry    = 1000;
+let fetchTimer = null;
+function requestTradesRefresh() {
+    clearTimeout(fetchTimer);
+    fetchTimer = setTimeout(fetchTrades, 800); // 800ms de gracia para consolidar escrituras DB
+}
 
 const fmtPrice  = v => v != null ? (+v).toFixed(6).replace(/\.?0+$/, '') : '—';
 const fmtPct    = v => v != null ? (v >= 0 ? '+' : '') + (+v).toFixed(2) + '%' : '—';
@@ -321,23 +326,9 @@ function renderClosed() {
 }
 
 function renderStats() {
-  const closed = trades.filter(t => t.status === 'closed' && t.pnl_usdt != null);
-  const today  = new Date().toISOString().slice(0, 10);
-  const todayC = closed.filter(t => (t.updated_at || '').startsWith(today));
-
-  const pnlTotal = closed.reduce((s, t) => s + (t.pnl_usdt || 0), 0);
-  const pnlDay   = todayC.reduce((s, t) => s + (t.pnl_usdt || 0), 0);
-  const wins     = closed.filter(t => t.pnl_usdt > 0).length;
-  const wr       = closed.length ? (wins / closed.length * 100).toFixed(1) + '%' : '—';
-
-  const openNow  = trades.filter(t =>
+  const openNow = trades.filter(t =>
     ['open','opening','signal_received','closing'].includes(t.status)).length;
-
-  setStat('s-open',        openNow,                                          openNow > 0 ? 'warn' : '');
-  setStat('s-pnl-total',   fmtUSDT(pnlTotal) + ' USDT',                    pnlClass(pnlTotal));
-  setStat('s-pnl-day',     fmtUSDT(pnlDay) + ' USDT',                      pnlClass(pnlDay));
-  setStat('s-trades-today',todayC.length);
-  setStat('s-wr',          wr,                                               wins / (closed.length || 1) >= 0.5 ? 'pos' : 'neg');
+  setStat('s-open', openNow, openNow > 0 ? 'warn' : '');
 }
 
 function setStat(id, val, cls='') {
@@ -434,8 +425,7 @@ function handleMessage(msg) {
   } else if (msg.type === 'event') {
     const ev = msg.data;
     appendEvent(ev);
-    // Disparar refresh de trades
-    fetchTrades();
+    requestTradesRefresh(); // Reemplazar llamada directa
   } else if (msg.type === 'trade_update') {
     upsertTrade(msg.data);
     renderOpen();
@@ -455,6 +445,13 @@ function updateStatus(data) {
     const el = document.getElementById('s-uptime');
     el.textContent = new Date(data.uptime_start).toLocaleString('es-ES',
       { dateStyle: 'short', timeStyle: 'short' });
+  }
+  // NUEVO: PnL y Estadísticas desde el backend real
+  if (data.pnl_total_usdt !== undefined) {
+      setStat('s-pnl-total', fmtUSDT(data.pnl_total_usdt) + ' USDT', pnlClass(data.pnl_total_usdt));
+      setStat('s-pnl-day', fmtUSDT(data.pnl_today_usdt) + ' USDT', pnlClass(data.pnl_today_usdt));
+      setStat('s-trades-today', data.trades_today);
+      setStat('s-wr', data.win_rate_pct + '%', data.win_rate_pct >= 50 ? 'pos' : 'neg');
   }
 }
 
