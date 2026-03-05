@@ -274,9 +274,10 @@ function renderOpen() {
   }
 
   document.getElementById('tbl-open').innerHTML = open.map(t => {
-    const pnlEst = t.entry_price
-      ? ((t.entry_price - t.entry_price * 0.85) / t.entry_price * 100).toFixed(2)
-      : null;   // placeholder — sin precio live
+    // PnL estimado al TP para SHORT: (entry - tp) / entry * 100
+    const pnlEst = (t.entry_price && t.tp_price)
+      ? (+t.entry_price - +t.tp_price) / +t.entry_price * 100
+      : null;
     const sizeUsdt = (t.entry_price && t.entry_quantity)
       ? (+t.entry_price * +t.entry_quantity).toFixed(2)
       : '—';
@@ -287,7 +288,7 @@ function renderOpen() {
       <td>${fmtPrice(t.entry_price)}</td>
       <td>${fmtPrice(t.tp_price)} <span class="muted">(${fmtPrice(t.tp_trigger_price)})</span></td>
       <td>${fmtPrice(t.sl_price)} <span class="muted">(${fmtPrice(t.sl_trigger_price)})</span></td>
-      <td class="${pnlClass(t.pnl_pct)}">${fmtPct(t.pnl_pct)}</td>
+      <td class="${pnlClass(pnlEst)}">${pnlEst !== null ? fmtPct(pnlEst) : '—'}</td>
       <td>${elapsed(t.entry_fill_ts || t.created_at)}</td>
       <td class="muted">${t.signal_data?.top || '—'}</td>
       <td class="muted">${t.signal_data?.categoria || '—'}</td>
