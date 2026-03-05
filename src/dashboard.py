@@ -23,7 +23,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Set
+from typing import Any, Awaitable, Callable, Set
 
 from aiohttp import web
 
@@ -77,7 +77,7 @@ class DashboardServer:
     def __init__(self,
                  cfg:         Config,
                  db:          StateDB,
-                 get_engine_status: Callable[[], dict]):
+                 get_engine_status: Callable[[], Awaitable[dict]]):
         self._cfg    = cfg
         self._db     = db
         self._get_engine_status = get_engine_status
@@ -160,7 +160,7 @@ class DashboardServer:
         return web.Response(text="Dashboard no encontrado", status=404)
 
     async def _handle_status(self, request: web.Request) -> web.Response:
-        status = self._get_engine_status()
+        status = await self._get_engine_status()
         status["uptime_start"] = self._start_time
         status["now"]          = datetime.now(timezone.utc).isoformat()
         return web.json_response(status)
@@ -209,7 +209,7 @@ class DashboardServer:
 
         try:
             # Enviar estado inicial
-            status = self._get_engine_status()
+            status = await self._get_engine_status()
             await ws.send_str(json.dumps({"type": "status", "data": status}))
 
             # Últimos eventos

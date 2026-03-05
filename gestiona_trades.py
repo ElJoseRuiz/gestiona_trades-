@@ -66,6 +66,7 @@ class App:
         self._watcher: SignalWatcher  = None  # type: ignore
         self._dash:    DashboardServer = None  # type: ignore
         self._stop_event = asyncio.Event()
+        self._configured_pairs: set[str] = set()
 
     # ──────────────────────────────────────────────────────────────────
     # Arranque
@@ -116,11 +117,20 @@ class App:
         # 5. Configurar leverage + margin type SOLO para los pares que SIGUEN activos
         current_active = self._engine.get_active_trades()
         if current_active:
-            pairs_seen = set()
-            for t in current_active:
-                if t.pair not in pairs_seen:
-                    await self._setup_pair(t.pair)
-                    pairs_seen.add(t.pair)
+            pairs_to_setup = {t.pair for t in current_active}
+            self._configured_pairs.update(pairs_to_setup)
+
+            # Ejecución concurrente en batches de 10 para no saturar el rate limit REST
+            async def _setup_batch(pairs_batch: list):
+                for p in pairs_batch:
+                    await self._setup_pair(p)
+
+            pairs_list = list(pairs_to_setup)
+            tasks = [
+                _setup_batch(pairs_list[i:i + 10])
+                for i in range(0, len(pairs_list), 10)
+            ]
+            await asyncio.gather(*tasks)
 
         # 6. Iniciar WSManager
         await self._ws_mgr.start()
@@ -208,8 +218,10 @@ class App:
     # ──────────────────────────────────────────────────────────────────
 
     async def _on_signal(self, signal):
-        # Configurar leverage/margin si es la primera vez que vemos el par
-        await self._setup_pair(signal.pair)
+        # Configurar leverage/margin solo la primera vez que vemos el par (caché en memoria)
+        if signal.pair not in self._configured_pairs:
+            await self._setup_pair(signal.pair)
+            self._configured_pairs.add(signal.pair)
         await self._engine.on_signal(signal)
 
     # ──────────────────────────────────────────────────────────────────
@@ -232,42 +244,19 @@ class App:
     # engine_status para el dashboard
     # ──────────────────────────────────────────────────────────────────
 
-    def _engine_status(self) -> dict:
+    async def _engine_status(self) -> dict:
         if not self._engine:
             return {"open_trades": 0, "max_open_trades": self._cfg.max_open_trades}
-        active = self._engine.get_active_trades()
-        closed_today = 0
-        pnl_today    = 0.0
-        pnl_total    = 0.0
-        wins         = 0
-        total_closed = 0
-
-        # PnL de trades en memoria (trades cerrados recientes)
-        # La DB tiene los históricos completos; aquí solo los activos en RAM
-        from src.models import TradeStatus
-        for t in active:
-            if t.status == TradeStatus.CLOSED:
-                if t.pnl_usdt:
-                    pnl_total += t.pnl_usdt
-                    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                    if t.exit_fill_ts and t.exit_fill_ts.startswith(today_str):
-                        pnl_today  += t.pnl_usdt
-                        closed_today += 1
-                total_closed += 1
-                if t.pnl_usdt and t.pnl_usdt > 0:
-                    wins += 1
-
-        win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
-
+        metrics = await self._db.get_daily_metrics()
         return {
-            "open_trades":      self._engine.open_count,
-            "max_open_trades":  self._cfg.max_open_trades,
-            "mode":             self._cfg.mode,
-            "pnl_today_usdt":   round(pnl_today,  4),
-            "pnl_total_usdt":   round(pnl_total,  4),
-            "trades_today":     closed_today,
-            "win_rate_pct":     round(win_rate, 1),
-            "ws_connected":     self._ws_mgr._connected if self._ws_mgr else False,
+            "open_trades":     self._engine.open_count,
+            "max_open_trades": self._cfg.max_open_trades,
+            "mode":            self._cfg.mode,
+            "pnl_today_usdt":  metrics["pnl_today"],
+            "pnl_total_usdt":  metrics["pnl_total"],
+            "trades_today":    metrics["closed_today"],
+            "win_rate_pct":    metrics["win_rate"],
+            "ws_connected":    self._ws_mgr._connected if self._ws_mgr else False,
         }
 
     # ──────────────────────────────────────────────────────────────────
@@ -301,11 +290,17 @@ class App:
 
         # 3. TradeEngine (cancela timeout checker)
         if self._engine:
-            await self._engine.stop()
+            try:
+                await asyncio.wait_for(self._engine.stop(), timeout=5.0)
+            except asyncio.TimeoutError:
+                log.warning("TradeEngine.stop() excedió 5s de timeout, continuando apagado.")
 
         # 4. WSManager
         if self._ws_mgr:
-            await self._ws_mgr.stop()
+            try:
+                await asyncio.wait_for(self._ws_mgr.stop(), timeout=5.0)
+            except asyncio.TimeoutError:
+                log.warning("WSManager.stop() excedió 5s de timeout, continuando apagado.")
 
         # 5. OrderManager (cierra sesión HTTP)
         if self._om:

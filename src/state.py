@@ -5,6 +5,7 @@ Tabla trades + tabla events. Recuperación tras reinicio.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -198,6 +199,36 @@ class StateDB:
         ) as cur:
             rows = await cur.fetchall()
         return [_row_to_event(r) for r in rows]
+
+    async def get_daily_metrics(self) -> dict:
+        """Calcula PnL y win rate del día y totales directamente desde SQLite."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        async with self._db.execute(
+            """
+            SELECT
+                COUNT(*)                                                                    AS total_closed,
+                COALESCE(SUM(pnl_usdt), 0.0)                                               AS pnl_total,
+                COALESCE(SUM(CASE WHEN exit_fill_ts LIKE ? THEN pnl_usdt ELSE 0 END), 0.0) AS pnl_today,
+                COUNT(CASE WHEN exit_fill_ts LIKE ? THEN 1 END)                            AS closed_today,
+                COUNT(CASE WHEN pnl_usdt > 0 THEN 1 END)                                  AS wins
+            FROM trades
+            WHERE status = ?
+            """,
+            (f"{today}%", f"{today}%", TradeStatus.CLOSED.value),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return {"total_closed": 0, "pnl_total": 0.0, "pnl_today": 0.0, "closed_today": 0, "win_rate": 0.0}
+        r     = dict(row)
+        total = r["total_closed"] or 0
+        wins  = r["wins"] or 0
+        return {
+            "total_closed": total,
+            "pnl_total":    round(r["pnl_total"] or 0.0, 4),
+            "pnl_today":    round(r["pnl_today"] or 0.0, 4),
+            "closed_today": r["closed_today"] or 0,
+            "win_rate":     round(wins / total * 100, 1) if total > 0 else 0.0,
+        }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
