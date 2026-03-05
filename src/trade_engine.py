@@ -1130,4 +1130,5 @@ def _signal_to_dict(sig: Signal) -> dict:
         "vol_ratio":    sig.vol_ratio,
         "trades_ratio": sig.trades_ratio,
         "quintil":      sig.quintil,
+        "categoria":    sig.categoria,
     }
