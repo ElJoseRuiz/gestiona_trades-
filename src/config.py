@@ -86,6 +86,10 @@ class Config:
     @property
     def sl_pct(self)              -> float:      return float(self._get("strategy", "sl_pct",            default=60))
     @property
+    def tp_posicion(self)         -> bool:       return bool(self._get("strategy",  "TP_posicion",       default=False))
+    @property
+    def sl_posicion(self)         -> bool:       return bool(self._get("strategy",  "SL_posicion",       default=False))
+    @property
     def trigger_offset_pct(self)  -> float:      return float(self._get("strategy", "trigger_offset_pct",default=10))
     @property
     def timeout_hours(self)       -> float:      return float(self._get("strategy", "timeout_hours",     default=24))

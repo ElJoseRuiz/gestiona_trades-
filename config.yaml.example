@@ -9,6 +9,8 @@ strategy:
   max_open_trades:    10               # máximo trades abiertos simultáneamente
   tp_pct:             15               # take profit %
   sl_pct:             60               # stop loss %
+  TP_posicion:        false            # Si true, cierra todos los trades del par al tocar TP
+  SL_posicion:        false            # Si true, cierra todos los trades del par al tocar SL
   trigger_offset_pct: 10               # trigger N% antes del target (safety orders)
   timeout_hours:      24               # cerrar si no toca TP/SL en N horas
   top_n:              1                # cuántos ranks procesar (1=solo top1)
