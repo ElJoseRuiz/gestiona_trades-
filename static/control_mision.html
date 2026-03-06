@@ -367,12 +367,33 @@ function renderClosed() {
     return;
   }
 
+  // --- Cálculo de Cuarentena Global ---
+  const QUARANTINE_MS = 4 * 60 * 60 * 1000; // 4 horas
+  const nowMs = Date.now();
+  const lastClosedByPair = {};
+
+  trades.forEach(t => {
+    if (t.status === 'closed' && t.exit_fill_ts) {
+      const ts = new Date(t.exit_fill_ts).getTime();
+      if (!lastClosedByPair[t.pair] || ts > lastClosedByPair[t.pair]) {
+        lastClosedByPair[t.pair] = ts;
+      }
+    }
+  });
+
   document.getElementById('tbl-closed').innerHTML = closed.map(t => {
     const sizeUsdt = (t.entry_price && t.entry_quantity)
       ? (+t.entry_price * +t.entry_quantity).toFixed(2)
       : '—';
+
+    let quarantineBadge = '';
+    const lastClose = lastClosedByPair[t.pair];
+    if (lastClose && (nowMs - lastClose) < QUARANTINE_MS) {
+      quarantineBadge = ' <span title="En periodo de cuarentena preventiva" style="color:#f4a261; font-size:9px; border:1px solid #f4a261; padding:1px 3px; border-radius:3px; margin-left:5px; vertical-align:middle;">⏳ 4h</span>';
+    }
+
     return `<tr>
-    <td><b>${t.pair}</b></td>
+    <td><b>${t.pair}</b>${quarantineBadge}</td>
     <td>${badge(t.status)}</td>
     <td>${sizeUsdt !== '—' ? sizeUsdt + ' $' : '—'}</td>
     <td>${fmtPrice(t.entry_price)}</td>
