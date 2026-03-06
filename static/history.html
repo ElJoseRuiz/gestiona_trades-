@@ -58,12 +58,13 @@
   </div>
 
   <div class="kpi-grid">
-    <div class="kpi-card"><span class="kpi-label">Net Profit</span><span class="kpi-val" id="kpi-pnl">—</span></div>
-    <div class="kpi-card"><span class="kpi-label">Max Drawdown</span><span class="kpi-val neg" id="kpi-dd">—</span></div>
     <div class="kpi-card"><span class="kpi-label">Total Trades</span><span class="kpi-val" id="kpi-trades">—</span></div>
     <div class="kpi-card"><span class="kpi-label">Win Rate</span><span class="kpi-val" id="kpi-wr">—</span></div>
-    <div class="kpi-card"><span class="kpi-label">Profit Factor</span><span class="kpi-val" id="kpi-pf">—</span></div>
     <div class="kpi-card"><span class="kpi-label">Avg Trade</span><span class="kpi-val" id="kpi-avg">—</span></div>
+    <div class="kpi-card"><span class="kpi-label">Net Profit</span><span class="kpi-val" id="kpi-pnl">—</span></div>
+    <div class="kpi-card"><span class="kpi-label">Max DD Equity</span><span class="kpi-val neg" id="kpi-dd">—</span></div>
+    <div class="kpi-card"><span class="kpi-label">Profit Factor</span><span class="kpi-val" id="kpi-pf">—</span></div>
+    <div class="kpi-card"><span class="kpi-label">Calmar Ratio</span><span class="kpi-val" id="kpi-calmar">—</span></div>
   </div>
 
   <div class="chart-grid">
@@ -234,16 +235,20 @@ function processData(trades) {
   const pf = grossLoss > 0 ? (grossProfit / grossLoss) : grossProfit;
   const wr = trades.length > 0 ? (wins / trades.length) * 100 : 0;
   const avg = trades.length > 0 ? cumPnl / trades.length : 0;
+  const calmar = maxDd !== 0 ? Math.abs(cumPnl / maxDd) : (cumPnl > 0 ? 99.99 : 0);
 
   // Renderizar KPIs
-  document.getElementById('kpi-pnl').textContent = cumPnl.toFixed(2) + ' USDT';
-  document.getElementById('kpi-pnl').className = 'kpi-val ' + pnlClass(cumPnl);
-  document.getElementById('kpi-dd').textContent = maxDd.toFixed(2) + ' USDT';
   document.getElementById('kpi-trades').textContent = trades.length;
   document.getElementById('kpi-wr').textContent = wr.toFixed(1) + '%';
   document.getElementById('kpi-wr').className = 'kpi-val ' + (wr >= 50 ? 'pos' : 'neg');
-  document.getElementById('kpi-pf').textContent = pf.toFixed(2);
   document.getElementById('kpi-avg').textContent = avg.toFixed(2) + ' USDT';
+
+  document.getElementById('kpi-pnl').textContent = cumPnl.toFixed(2) + ' USDT';
+  document.getElementById('kpi-pnl').className = 'kpi-val ' + pnlClass(cumPnl);
+  document.getElementById('kpi-dd').textContent = maxDd.toFixed(2) + ' USDT';
+
+  document.getElementById('kpi-pf').textContent = pf.toFixed(2);
+  document.getElementById('kpi-calmar').textContent = calmar.toFixed(2);
 
   if (trades.length === 0) return;
 
