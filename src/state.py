@@ -171,7 +171,7 @@ class StateDB:
         sql = "SELECT * FROM trades ORDER BY created_at ASC"
         async with self._db.execute(sql) as cursor:
             rows = await cursor.fetchall()
-        return [self._row_to_trade(r) for r in rows]
+        return [_row_to_trade(r) for r in rows]
 
     async def get_last_closed_time(self, pair: str) -> datetime | None:
         """Devuelve el datetime del último cierre registrado para un par específico."""
