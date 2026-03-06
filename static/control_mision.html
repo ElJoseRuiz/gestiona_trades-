@@ -141,6 +141,8 @@
     <div class="stat-chip cfg-chip"><span class="label">Max Trades</span><span class="value" id="cfg-max-open" style="font-size:13px">—</span></div>
     <div class="stat-chip cfg-chip"><span class="label">Max/Par</span><span class="value" id="cfg-max-pair" style="font-size:13px">—</span></div>
     <div class="stat-chip cfg-chip"><span class="label">TP %</span><span class="value cfg-val-tp" id="cfg-tp" style="font-size:13px">—</span></div>
+    <div class="stat-chip cfg-chip"><span class="label">TP Posición</span><span class="value" id="cfg-tp-posicion" style="font-size:13px">—</span></div>
+    <div class="stat-chip cfg-chip" id="cfg-min-tp-chip" style="display:none"><span class="label">Min TP Pos %</span><span class="value cfg-val-tp" id="cfg-min-tp-posicion" style="font-size:13px">—</span></div>
     <div class="stat-chip cfg-chip"><span class="label">SL %</span><span class="value cfg-val-sl" id="cfg-sl" style="font-size:13px">—</span></div>
   </div>
 
@@ -684,6 +686,15 @@ async function fetchConfig() {
     setEl('cfg-max-pair', s.max_trades_per_pair != null ? s.max_trades_per_pair : '—');
     setEl('cfg-tp',       s.tp_pct != null ? s.tp_pct + '%' : '—');
     setEl('cfg-sl',       s.sl_pct != null ? s.sl_pct + '%' : '—');
+    const tpPos = s.TP_posicion;
+    const tpPosEl = document.getElementById('cfg-tp-posicion');
+    if (tpPosEl) {
+      tpPosEl.textContent = tpPos != null ? (tpPos ? 'ON' : 'OFF') : '—';
+      tpPosEl.className   = 'value ' + (tpPos ? 'pos' : 'muted');
+    }
+    const minChip = document.getElementById('cfg-min-tp-chip');
+    if (minChip) minChip.style.display = tpPos ? '' : 'none';
+    setEl('cfg-min-tp-posicion', s.Min_TP_posicion != null ? s.Min_TP_posicion + '%' : '—');
   } catch(e) { console.error('fetchConfig', e); }
 }
 
