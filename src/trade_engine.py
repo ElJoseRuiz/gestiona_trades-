@@ -958,26 +958,26 @@ class TradeEngine:
     async def _close_sibling_trades(self, pair: str, trigger_type: str, exclude_trade_id: str):
         """
         Cierra trades hermanos en cascada con un modelo Maker Progresivo.
-        Intento 1: LIMIT al Mid-Price (60s)
-        Intento 2: LIMIT a mitad de camino entre Mid-Price y Ask (60s)
-        Intento 3: MARKET (Liquidación remanente)
-        Desfase entre procesos: 5 segundos. Tolerante a condiciones de carrera -2011.
+        Previene la doble ejecución "bloqueando" (CLOSING) los trades síncronamente antes del sleep.
         """
-        siblings = [
-            t for t in self._trades.values()
-            if t.pair == pair and t.status == TradeStatus.OPEN and t.trade_id != exclude_trade_id
-        ]
+        siblings = []
+        for t in self._trades.values():
+            if t.pair == pair and t.status == TradeStatus.OPEN and t.trade_id != exclude_trade_id:
+                # BLOQUEO SÍNCRONO: Previene que otra cascada concurrente los capture durante los sleeps
+                t.status = TradeStatus.CLOSING
+                t.touch()
+                siblings.append(t)
 
         if not siblings:
             return
 
         log.info(f"Cierre en cascada ({trigger_type}_posicion=True) para {len(siblings)} trades de {pair}")
 
-        async def process_one_sibling(t: Trade):
-            t.status = TradeStatus.CLOSING
-            t.touch()
+        # Guardar el estado de bloqueo en la base de datos de inmediato
+        for t in siblings:
             await self._db.save_trade(t)
 
+        async def process_one_sibling(t: Trade):
             await self._cancel_counterpart(t, "tp")
             await self._cancel_counterpart(t, "sl")
 
