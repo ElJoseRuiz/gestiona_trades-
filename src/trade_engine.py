@@ -942,108 +942,140 @@ class TradeEngine:
 
     async def _close_sibling_trades(self, pair: str, trigger_type: str, exclude_trade_id: str):
         """
-        Busca trades hermanos del mismo par y los cierra en cascada secuencialmente.
-        Si van ganando, intenta salir pasivamente con LIMIT en el Mid Price durante 60s.
-        Si van perdiendo, o expira el tiempo, sale a MARKET.
+        Cierra trades hermanos en cascada con un modelo Maker Progresivo.
+        Intento 1: LIMIT al Mid-Price (60s)
+        Intento 2: LIMIT a mitad de camino entre Mid-Price y Ask (60s)
+        Intento 3: MARKET (Liquidación remanente)
+        Desfase entre procesos: 5 segundos.
         """
         siblings = [
             t for t in self._trades.values()
             if t.pair == pair and t.status == TradeStatus.OPEN and t.trade_id != exclude_trade_id
         ]
+
         if not siblings:
             return
+
         log.info(f"Cierre en cascada ({trigger_type}_posicion=True) para {len(siblings)} trades de {pair}")
-        for t in siblings:
+
+        async def process_one_sibling(t: Trade):
             t.status = TradeStatus.CLOSING
             t.touch()
             await self._db.save_trade(t)
-            # Cancelar órdenes TP/SL pendientes nativas de Binance
+
             await self._cancel_counterpart(t, "tp")
             await self._cancel_counterpart(t, "sl")
+
             try:
                 if trigger_type == "TP":
-                    # Obtener estado actual del libro para evaluar la rentabilidad
                     bid = await self._order_mgr.get_best_bid(pair)
                     ask = await self._order_mgr.get_best_ask(pair)
                     mid_price = (bid + ask) / 2.0
 
-                    # SHORT position: Va ganando si el precio actual es menor al de entrada
                     is_winning = mid_price < t.entry_price
+
                     if is_winning:
-                        # Cuantización para cumplir con las reglas de lote (Tick Size) de Binance
                         info = await self._order_mgr.get_exchange_info(pair)
                         tick_size = info["tick_size"]
                         tick_dec = Decimal(str(tick_size))
+
+                        # --- INTENTO 1: LIMIT (Mid Price) ---
                         mid_price_rounded = float(Decimal(str(mid_price)).quantize(tick_dec))
+                        log.info(f"Trade {t.trade_id[:8]} cascada TP (GANANDO). Intento 1 (LIMIT) en {mid_price_rounded}")
 
-                        log.info(f"Trade {t.trade_id[:8]} en cascada TP (GANANDO). "
-                                 f"Intentando salida LIMIT en {mid_price_rounded}")
+                        limit_1 = await self._order_mgr.close_position_limit(t.pair, t.entry_quantity, mid_price_rounded)
+                        close_oid_1 = int(limit_1["orderId"])
 
-                        limit_order = await self._order_mgr.close_position_limit(t.pair, t.entry_quantity, mid_price_rounded)
-                        close_oid = int(limit_order["orderId"])
+                        filled_p1 = await self._wait_close_fill(close_oid_1, t.pair, 60.0)
 
-                        # Esperar hasta 60 segundos por el fill
-                        filled_price = await self._wait_close_fill(close_oid, t.pair, 60.0)
-
-                        if filled_price:
-                            # Fill completo ejecutado de forma pasiva
-                            t.exit_price = filled_price
+                        if filled_p1:
+                            t.exit_price = filled_p1
                             t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
-                            t.exit_type = "TP_CASCADE_LIMIT"
+                            t.exit_type = "TP_CASCADE_LIMIT_1"
                             await self._close_trade(t)
-                            continue
+                            return
 
-                        # Si llegamos aquí, expiraron los 60s. Auditar ejecuciones parciales y purgar.
-                        log.info(f"Trade {t.trade_id[:8]} Limit expirada (60s). Purgando remanente a MARKET.")
+                        # Expiración 1
+                        log.info(f"Trade {t.trade_id[:8]} Intento 1 expirado. Evaluando Intento 2.")
+                        od_1 = await self._order_mgr.get_order(t.pair, close_oid_1)
+                        exec_qty_1 = float(od_1.get("executedQty", 0))
+                        avg_p1 = float(od_1.get("avgPrice") or od_1.get("price") or 0)
 
-                        try:
-                            # 1. Foto finish de la orden para recuperar métricas de fill parcial
-                            od = await self._order_mgr.get_order(t.pair, close_oid)
-                            executed_qty = float(od.get("executedQty", 0))
-                            avg_price_limit = float(od.get("avgPrice") or od.get("price") or 0)
+                        await self._order_mgr.cancel_order(t.pair, close_oid_1)
+                        rem_qty_1 = t.entry_quantity - exec_qty_1
 
-                            # 2. Desmontar la red
-                            await self._order_mgr.cancel_order(t.pair, close_oid)
+                        if rem_qty_1 > 0:
+                            # --- INTENTO 2: LIMIT (Maker Agresivo: entre Mid y Ask) ---
+                            new_bid = await self._order_mgr.get_best_bid(pair)
+                            new_ask = await self._order_mgr.get_best_ask(pair)
+                            new_mid = (new_bid + new_ask) / 2.0
 
-                            # 3. Calcular la exposición restante
-                            remaining_qty = t.entry_quantity - executed_qty
+                            # Acercamos el precio al ASK para forzar el cruce sin ser Taker
+                            aggro_maker_price = (new_mid + new_ask) / 2.0
+                            aggro_rounded = float(Decimal(str(aggro_maker_price)).quantize(tick_dec))
 
-                            if remaining_qty > 0:
-                                # 4. Liquidar el resto agresivamente
-                                mkt_res = await self._order_mgr.close_position_market(t.pair, remaining_qty)
-                                mkt_price = float(mkt_res.get("avgPrice") or mkt_res.get("price") or 0)
+                            log.info(f"Trade {t.trade_id[:8]} cascada TP. Intento 2 (LIMIT Maker Agresivo) en {aggro_rounded} por qty {rem_qty_1}")
 
-                                # 5. Consolidación de PnL Ponderado
-                                if executed_qty > 0:
-                                    final_exit_price = ((avg_price_limit * executed_qty) + (mkt_price * remaining_qty)) / t.entry_quantity
+                            limit_2 = await self._order_mgr.close_position_limit(t.pair, rem_qty_1, aggro_rounded)
+                            close_oid_2 = int(limit_2["orderId"])
+
+                            filled_p2 = await self._wait_close_fill(close_oid_2, t.pair, 60.0)
+
+                            if filled_p2:
+                                if exec_qty_1 > 0:
+                                    t.exit_price = ((avg_p1 * exec_qty_1) + (filled_p2 * rem_qty_1)) / t.entry_quantity
+                                    t.exit_type = "TP_CASCADE_MIXED_LIMITS"
                                 else:
-                                    final_exit_price = mkt_price
+                                    t.exit_price = filled_p2
+                                    t.exit_type = "TP_CASCADE_LIMIT_2"
 
-                                t.exit_price = final_exit_price
                                 t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
-                                t.exit_type = "TP_CASCADE_MIXED"
                                 await self._close_trade(t)
-                                continue
+                                return
+
+                            # Expiración 2
+                            log.info(f"Trade {t.trade_id[:8]} Intento 2 expirado. Purgando remanente a MARKET.")
+                            od_2 = await self._order_mgr.get_order(t.pair, close_oid_2)
+                            exec_qty_2 = float(od_2.get("executedQty", 0))
+                            avg_p2 = float(od_2.get("avgPrice") or od_2.get("price") or 0)
+
+                            await self._order_mgr.cancel_order(t.pair, close_oid_2)
+                            rem_qty_final = rem_qty_1 - exec_qty_2
+
+                            if rem_qty_final > 0:
+                                # --- INTENTO 3: MARKET (Liquidación Final) ---
+                                mkt_res = await self._order_mgr.close_position_market(t.pair, rem_qty_final)
+                                mkt_p = float(mkt_res.get("avgPrice") or mkt_res.get("price") or 0)
+
+                                total_val = (exec_qty_1 * avg_p1) + (exec_qty_2 * avg_p2) + (rem_qty_final * mkt_p)
+                                t.exit_price = total_val / t.entry_quantity
+                                t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
+                                t.exit_type = "TP_CASCADE_MARKET_FALLBACK"
+                                await self._close_trade(t)
+                                return
                             else:
-                                # Race condition a nuestro favor: se llenó el 100% justo antes de cancelar
-                                t.exit_price = avg_price_limit
+                                total_val = (exec_qty_1 * avg_p1) + (exec_qty_2 * avg_p2)
+                                t.exit_price = total_val / t.entry_quantity
                                 t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
-                                t.exit_type = "TP_CASCADE_LIMIT"
+                                t.exit_type = "TP_CASCADE_MIXED_LIMITS"
                                 await self._close_trade(t)
-                                continue
-
-                        except Exception as ce:
-                            log.error(f"Error procesando fallback Market tras expiración de Limit en cascada: {ce}")
-                            # Se delega al bloque global inferior como fallback de emergencia absoluto
+                                return
+                        else:
+                            t.exit_price = avg_p1
+                            t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
+                            t.exit_type = "TP_CASCADE_LIMIT_1"
+                            await self._close_trade(t)
+                            return
                     else:
                         log.info(f"Trade {t.trade_id[:8]} en cascada TP (PERDIENDO). Liquidación agresiva (MARKET)")
-                # Bloque global (Fallback de emergencia / Cascada SL / Cascada TP Perdedora)
+
+                # Fallback Estructural / Perdedores Directos
                 result = await self._order_mgr.close_position_market(t.pair, t.entry_quantity)
                 exit_price = float(result.get("avgPrice") or result.get("price") or 0)
 
                 t.exit_price = exit_price
                 t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
-                t.exit_type = f"{trigger_type}_CASCADE"
+                t.exit_type = f"{trigger_type}_CASCADE_MKT"
                 await self._close_trade(t)
 
             except Exception as e:
@@ -1052,6 +1084,11 @@ class TradeEngine:
                 t.error_message = f"Cascade close error: {e}"
                 t.touch()
                 await self._db.save_trade(t)
+
+        # Desarmado escalonado: lanza tareas paralelas separadas por 5 segundos
+        for t in siblings:
+            asyncio.create_task(process_one_sibling(t), name=f"cascade_{t.trade_id[:8]}")
+            await asyncio.sleep(5.0)
 
     # ──────────────────────────────────────────────────────────────────
     # Timeout checker
