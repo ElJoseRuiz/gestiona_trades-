@@ -62,12 +62,13 @@ class Signal:
     fecha_hora:   str
     pair:         str
     top:          int
-    close:        float
-    mom_1h_pct:   float
+    close:        Optional[float]   # None si el CSV trae ""
+    mom_1h_pct:   Optional[float]   # None si el CSV trae ""
     mom_pct:      float
     vol_ratio:    float
     trades_ratio: float
     quintil:      int
+    categoria:    str      = ""     # columna #10 del nuevo formato
     signal_dt:    datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 

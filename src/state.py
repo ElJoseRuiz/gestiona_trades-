@@ -159,6 +159,34 @@ class StateDB:
             rows = await cur.fetchall()
         return [_row_to_trade(r) for r in rows]
 
+    async def get_closed_trades(self) -> list[Trade]:
+        """Extrae el histórico completo de operaciones cerradas ordenado por fecha de salida."""
+        sql = "SELECT * FROM trades WHERE status = 'closed' ORDER BY exit_fill_ts ASC"
+        async with self._db.execute(sql) as cursor:
+            rows = await cursor.fetchall()
+        return [_row_to_trade(r) for r in rows]
+
+    async def get_all_history_trades(self) -> list[Trade]:
+        """Extrae el histórico absoluto (abiertos y cerrados) para el cálculo de concurrencia."""
+        sql = "SELECT * FROM trades ORDER BY created_at ASC"
+        async with self._db.execute(sql) as cursor:
+            rows = await cursor.fetchall()
+        return [_row_to_trade(r) for r in rows]
+
+    async def get_last_closed_time(self, pair: str) -> datetime | None:
+        """Devuelve el datetime del último cierre registrado para un par específico."""
+        sql = "SELECT exit_fill_ts FROM trades WHERE pair = ? AND status = 'closed' AND exit_fill_ts IS NOT NULL ORDER BY exit_fill_ts DESC LIMIT 1"
+        async with self._db.execute(sql, (pair,)) as cursor:
+            row = await cursor.fetchone()
+
+        if row and row[0]:
+            try:
+                ts_str = row[0].replace("Z", "+00:00")
+                return datetime.fromisoformat(ts_str)
+            except Exception as e:
+                log.error(f"Error parseando fecha de cuarentena para {pair} ({row[0]}): {e}")
+        return None
+
     async def get_trade(self, trade_id: str) -> Optional[Trade]:
         async with self._db.execute(
             "SELECT * FROM trades WHERE trade_id=?", (trade_id,)
@@ -201,33 +229,30 @@ class StateDB:
         return [_row_to_event(r) for r in rows]
 
     async def get_daily_metrics(self) -> dict:
-        """Calcula PnL y win rate del día y totales directamente desde SQLite."""
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        async with self._db.execute(
-            """
+        """Calcula PnL y wins del día y totales directamente desde SQLite."""
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        sql = """
             SELECT
-                COUNT(*)                                                                    AS total_closed,
-                COALESCE(SUM(pnl_usdt), 0.0)                                               AS pnl_total,
-                COALESCE(SUM(CASE WHEN exit_fill_ts LIKE ? THEN pnl_usdt ELSE 0 END), 0.0) AS pnl_today,
-                COUNT(CASE WHEN exit_fill_ts LIKE ? THEN 1 END)                            AS closed_today,
-                COUNT(CASE WHEN pnl_usdt > 0 THEN 1 END)                                  AS wins
+                COUNT(*) as total_closed,
+                SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(pnl_usdt) as pnl_total,
+                SUM(CASE WHEN exit_fill_ts LIKE ? THEN pnl_usdt ELSE 0 END) as pnl_today,
+                SUM(CASE WHEN exit_fill_ts LIKE ? THEN 1 ELSE 0 END) as closed_today
             FROM trades
-            WHERE status = ?
-            """,
-            (f"{today}%", f"{today}%", TradeStatus.CLOSED.value),
-        ) as cur:
-            row = await cur.fetchone()
+            WHERE status = 'closed'
+        """
+        async with self._db.execute(sql, (f"{today_str}%", f"{today_str}%")) as cursor:
+            row = await cursor.fetchone()
+
         if not row:
-            return {"total_closed": 0, "pnl_total": 0.0, "pnl_today": 0.0, "closed_today": 0, "win_rate": 0.0}
-        r     = dict(row)
-        total = r["total_closed"] or 0
-        wins  = r["wins"] or 0
+            return {"total_closed": 0, "wins": 0, "pnl_total": 0.0, "pnl_today": 0.0, "closed_today": 0}
+
         return {
-            "total_closed": total,
-            "pnl_total":    round(r["pnl_total"] or 0.0, 4),
-            "pnl_today":    round(r["pnl_today"] or 0.0, 4),
-            "closed_today": r["closed_today"] or 0,
-            "win_rate":     round(wins / total * 100, 1) if total > 0 else 0.0,
+            "total_closed": row[0] or 0,
+            "wins":         row[1] or 0,
+            "pnl_total":    row[2] or 0.0,
+            "pnl_today":    row[3] or 0.0,
+            "closed_today": row[4] or 0
         }
 
 

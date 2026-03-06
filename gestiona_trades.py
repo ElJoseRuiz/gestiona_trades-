@@ -247,16 +247,21 @@ class App:
     async def _engine_status(self) -> dict:
         if not self._engine:
             return {"open_trades": 0, "max_open_trades": self._cfg.max_open_trades}
+
         metrics = await self._db.get_daily_metrics()
+
+        total_closed = metrics["total_closed"]
+        wins = metrics["wins"]
+        win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
         return {
-            "open_trades":     self._engine.open_count,
-            "max_open_trades": self._cfg.max_open_trades,
-            "mode":            self._cfg.mode,
-            "pnl_today_usdt":  metrics["pnl_today"],
-            "pnl_total_usdt":  metrics["pnl_total"],
-            "trades_today":    metrics["closed_today"],
-            "win_rate_pct":    metrics["win_rate"],
-            "ws_connected":    self._ws_mgr._connected if self._ws_mgr else False,
+            "open_trades":      self._engine.open_count,
+            "max_open_trades":  self._cfg.max_open_trades,
+            "mode":             self._cfg.mode,
+            "pnl_today_usdt":   round(metrics["pnl_today"], 4),
+            "pnl_total_usdt":   round(metrics["pnl_total"], 4),
+            "trades_today":     metrics["closed_today"],
+            "win_rate_pct":     round(win_rate, 1),
+            "ws_connected":     self._ws_mgr._connected if self._ws_mgr else False,
         }
 
     # ──────────────────────────────────────────────────────────────────

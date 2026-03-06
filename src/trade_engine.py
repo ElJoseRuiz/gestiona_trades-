@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from typing import Callable, Awaitable, Dict, Optional
 
 from .config import Config
@@ -413,6 +414,21 @@ class TradeEngine:
     # ──────────────────────────────────────────────────────────────────
 
     async def on_signal(self, sig: Signal):
+        # --- Control de Cuarentena ---
+        if self._cfg.quarantine_hours > 0:
+            last_closed = await self._db.get_last_closed_time(sig.pair)
+            if last_closed:
+                now_utc = datetime.now(timezone.utc)
+                if last_closed.tzinfo is None:
+                    last_closed = last_closed.replace(tzinfo=timezone.utc)
+                hours_since = (now_utc - last_closed).total_seconds() / 3600.0
+                if hours_since < self._cfg.quarantine_hours:
+                    log.info(
+                        f"Señal {sig.pair} descartada: CUARENTENA "
+                        f"(último cierre hace {hours_since:.2f}h, requiere {self._cfg.quarantine_hours}h)"
+                    )
+                    return
+
         # Límites globales
         if self.open_count >= self._cfg.max_open_trades:
             log.info(
@@ -709,8 +725,9 @@ class TradeEngine:
                 f"algoId={tp_oid} stopPrice={trade.tp_trigger_price}"
             )
         except BinanceError as e:
-            if e.code == -2021:
+            if e.code in (-2021, -2010):
                 # El precio ya cruzó el TP mientras el bot estaba apagado/desincronizado.
+                # -2021: precio cruzado en algos; -2010: LIMIT GTX rechazado porque ya cruzó.
                 # Como es TP (ganancia), y Binance opera en neto, el mercado ya cerró esta porción de liquidez.
                 log.warning(
                     f"Trade {trade.trade_id[:8]} {trade.pair}: TP superado (-2021) "
@@ -939,7 +956,13 @@ class TradeEngine:
     # ──────────────────────────────────────────────────────────────────
 
     async def _close_sibling_trades(self, pair: str, trigger_type: str, exclude_trade_id: str):
-        """Busca trades hermanos del mismo par y los cierra a mercado (Cascada posicional)."""
+        """
+        Cierra trades hermanos en cascada con un modelo Maker Progresivo.
+        Intento 1: LIMIT al Mid-Price (60s)
+        Intento 2: LIMIT a mitad de camino entre Mid-Price y Ask (60s)
+        Intento 3: MARKET (Liquidación remanente)
+        Desfase entre procesos: 5 segundos. Tolerante a condiciones de carrera -2011.
+        """
         siblings = [
             t for t in self._trades.values()
             if t.pair == pair and t.status == TradeStatus.OPEN and t.trade_id != exclude_trade_id
@@ -950,7 +973,7 @@ class TradeEngine:
 
         log.info(f"Cierre en cascada ({trigger_type}_posicion=True) para {len(siblings)} trades de {pair}")
 
-        for t in siblings:
+        async def process_one_sibling(t: Trade):
             t.status = TradeStatus.CLOSING
             t.touch()
             await self._db.save_trade(t)
@@ -959,19 +982,140 @@ class TradeEngine:
             await self._cancel_counterpart(t, "sl")
 
             try:
+                if trigger_type == "TP":
+                    bid = await self._order_mgr.get_best_bid(pair)
+                    ask = await self._order_mgr.get_best_ask(pair)
+                    mid_price = (bid + ask) / 2.0
+
+                    is_winning = mid_price < t.entry_price
+
+                    if is_winning:
+                        info = await self._order_mgr.get_exchange_info(pair)
+                        tick_size = info["tick_size"]
+                        tick_dec = Decimal(str(tick_size))
+
+                        # --- INTENTO 1: LIMIT (Mid Price) ---
+                        mid_price_rounded = float(Decimal(str(mid_price)).quantize(tick_dec))
+                        log.info(f"Trade {t.trade_id[:8]} cascada TP (GANANDO). Intento 1 (LIMIT) en {mid_price_rounded}")
+
+                        limit_1 = await self._order_mgr.close_position_limit(t.pair, t.entry_quantity, mid_price_rounded)
+                        close_oid_1 = int(limit_1["orderId"])
+
+                        filled_p1 = await self._wait_close_fill(close_oid_1, t.pair, 60.0)
+
+                        if filled_p1:
+                            t.exit_price = filled_p1
+                            t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
+                            t.exit_type = "TP_CASCADE_LIMIT_1"
+                            await self._close_trade(t)
+                            return
+
+                        # --- Expiración Intento 1 ---
+                        log.info(f"Trade {t.trade_id[:8]} Intento 1 expirado. Evaluando Intento 2.")
+                        od_1 = await self._order_mgr.get_order(t.pair, close_oid_1)
+                        status_1 = od_1.get("status", "")
+                        exec_qty_1 = float(od_1.get("executedQty", 0))
+                        avg_p1 = float(od_1.get("avgPrice") or od_1.get("price") or 0)
+
+                        if status_1 in ("NEW", "PARTIALLY_FILLED"):
+                            try:
+                                await self._order_mgr.cancel_order(t.pair, close_oid_1)
+                            except Exception as ce:
+                                log.warning(f"Trade {t.trade_id[:8]} ignorando fallo al cancelar L1 (-2011 carrera): {ce}")
+
+                        rem_qty_1 = t.entry_quantity - exec_qty_1
+
+                        # Si se llenó por completo silenciosamente
+                        if rem_qty_1 <= 0 or status_1 == "FILLED":
+                            t.exit_price = avg_p1
+                            t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
+                            t.exit_type = "TP_CASCADE_LIMIT_1_LATE"
+                            await self._close_trade(t)
+                            return
+
+                        # --- INTENTO 2: LIMIT (Maker Agresivo) ---
+                        new_bid = await self._order_mgr.get_best_bid(pair)
+                        new_ask = await self._order_mgr.get_best_ask(pair)
+                        new_mid = (new_bid + new_ask) / 2.0
+
+                        aggro_maker_price = (new_mid + new_ask) / 2.0
+                        aggro_rounded = float(Decimal(str(aggro_maker_price)).quantize(tick_dec))
+
+                        log.info(f"Trade {t.trade_id[:8]} cascada TP. Intento 2 (LIMIT Agresivo) en {aggro_rounded} por qty {rem_qty_1}")
+
+                        limit_2 = await self._order_mgr.close_position_limit(t.pair, rem_qty_1, aggro_rounded)
+                        close_oid_2 = int(limit_2["orderId"])
+
+                        filled_p2 = await self._wait_close_fill(close_oid_2, t.pair, 60.0)
+
+                        if filled_p2:
+                            if exec_qty_1 > 0:
+                                t.exit_price = ((avg_p1 * exec_qty_1) + (filled_p2 * rem_qty_1)) / t.entry_quantity
+                                t.exit_type = "TP_CASCADE_MIXED_LIMITS"
+                            else:
+                                t.exit_price = filled_p2
+                                t.exit_type = "TP_CASCADE_LIMIT_2"
+
+                            t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
+                            await self._close_trade(t)
+                            return
+
+                        # --- Expiración Intento 2 ---
+                        log.info(f"Trade {t.trade_id[:8]} Intento 2 expirado. Purgando remanente a MARKET.")
+                        od_2 = await self._order_mgr.get_order(t.pair, close_oid_2)
+                        status_2 = od_2.get("status", "")
+                        exec_qty_2 = float(od_2.get("executedQty", 0))
+                        avg_p2 = float(od_2.get("avgPrice") or od_2.get("price") or 0)
+
+                        if status_2 in ("NEW", "PARTIALLY_FILLED"):
+                            try:
+                                await self._order_mgr.cancel_order(t.pair, close_oid_2)
+                            except Exception as ce:
+                                log.warning(f"Trade {t.trade_id[:8]} ignorando fallo al cancelar L2 (-2011 carrera): {ce}")
+
+                        rem_qty_final = rem_qty_1 - exec_qty_2
+
+                        if rem_qty_final > 0:
+                            # --- INTENTO 3: MARKET (Liquidación Final) ---
+                            mkt_res = await self._order_mgr.close_position_market(t.pair, rem_qty_final)
+                            mkt_p = float(mkt_res.get("avgPrice") or mkt_res.get("price") or 0)
+
+                            total_val = (exec_qty_1 * avg_p1) + (exec_qty_2 * avg_p2) + (rem_qty_final * mkt_p)
+                            t.exit_price = total_val / t.entry_quantity
+                            t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
+                            t.exit_type = "TP_CASCADE_MARKET_FALLBACK"
+                            await self._close_trade(t)
+                            return
+                        else:
+                            total_val = (exec_qty_1 * avg_p1) + (exec_qty_2 * avg_p2)
+                            t.exit_price = total_val / t.entry_quantity
+                            t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
+                            t.exit_type = "TP_CASCADE_MIXED_LIMITS"
+                            await self._close_trade(t)
+                            return
+                    else:
+                        log.info(f"Trade {t.trade_id[:8]} en cascada TP (PERDIENDO). Liquidación agresiva (MARKET)")
+
+                # Fallback Estructural / Perdedores Directos
                 result = await self._order_mgr.close_position_market(t.pair, t.entry_quantity)
                 exit_price = float(result.get("avgPrice") or result.get("price") or 0)
 
-                t.exit_price   = exit_price
+                t.exit_price = exit_price
                 t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
-                t.exit_type    = f"{trigger_type}_CASCADE"
+                t.exit_type = f"{trigger_type}_CASCADE_MKT"
                 await self._close_trade(t)
+
             except Exception as e:
                 log.error(f"Error cerrando en cascada trade {t.trade_id[:8]}: {e}", exc_info=True)
-                t.status        = TradeStatus.ERROR
+                t.status = TradeStatus.ERROR
                 t.error_message = f"Cascade close error: {e}"
                 t.touch()
                 await self._db.save_trade(t)
+
+        # Desarmado escalonado: lanza tareas paralelas separadas por 5 segundos
+        for t in siblings:
+            asyncio.create_task(process_one_sibling(t), name=f"cascade_{t.trade_id[:8]}")
+            await asyncio.sleep(5.0)
 
     # ──────────────────────────────────────────────────────────────────
     # Timeout checker
@@ -1129,4 +1273,5 @@ def _signal_to_dict(sig: Signal) -> dict:
         "vol_ratio":    sig.vol_ratio,
         "trades_ratio": sig.trades_ratio,
         "quintil":      sig.quintil,
+        "categoria":    sig.categoria,
     }

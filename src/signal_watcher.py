@@ -152,12 +152,13 @@ class SignalWatcher:
                     fecha_hora   = fecha_hora,
                     pair         = par,
                     top          = top,
-                    close        = float(row.get("close",        0) or 0),
-                    mom_1h_pct   = float(row.get("mom_1h_pct",   0) or 0),
+                    close        = _parse_opt_float(row.get("close",       "")),
+                    mom_1h_pct   = _parse_opt_float(row.get("mom_1h_pct",  "")),
                     mom_pct      = float(row.get("mom_pct",      0) or 0),
                     vol_ratio    = float(row.get("vol_ratio",    0) or 0),
                     trades_ratio = float(row.get("trades_ratio", 0) or 0),
                     quintil      = int(float(row.get("quintil",  0) or 0)),
+                    categoria    = row.get("categoria", "").strip(),
                     signal_dt    = sig_dt,
                 )
             except (ValueError, TypeError) as e:
@@ -172,9 +173,10 @@ class SignalWatcher:
                 updates[key] = "si"
                 continue
 
+            mom_str = f"{sig.mom_1h_pct:.2f}%" if sig.mom_1h_pct is not None else "N/A"
             log.info(
-                f"Señal aceptada: {par} top={top} "
-                f"mom_1h={sig.mom_1h_pct:.2f}% mom={sig.mom_pct:.2f}% "
+                f"Señal aceptada: {par} top={top} cat={sig.categoria} "
+                f"mom_1h={mom_str} mom={sig.mom_pct:.2f}% "
                 f"vol={sig.vol_ratio:.1f} tr={sig.trades_ratio:.1f} Q{sig.quintil}"
             )
             signals.append(sig)
@@ -184,8 +186,10 @@ class SignalWatcher:
 
     def _apply_filters(self, sig: Signal) -> Optional[str]:
         """Devuelve el motivo de rechazo, o None si pasa todos los filtros."""
-        if sig.mom_1h_pct < self._cfg.min_momentum_pct:
-            return f"mom_1h_pct={sig.mom_1h_pct:.2f} < {self._cfg.min_momentum_pct}"
+        mom = sig.mom_1h_pct
+        if mom is None or mom < self._cfg.min_momentum_pct:
+            val = f"{mom:.2f}" if mom is not None else "N/A"
+            return f"mom_1h_pct={val} < {self._cfg.min_momentum_pct}"
         if self._cfg.min_vol_ratio > 0 and sig.vol_ratio < self._cfg.min_vol_ratio:
             return f"vol_ratio={sig.vol_ratio:.2f} < {self._cfg.min_vol_ratio}"
         if self._cfg.min_trades_ratio > 0 and sig.trades_ratio < self._cfg.min_trades_ratio:
@@ -198,6 +202,12 @@ class SignalWatcher:
 # ──────────────────────────────────────────────────────────────────────────────
 # CSV I/O (síncrono, ejecutado en executor)
 # ──────────────────────────────────────────────────────────────────────────────
+
+def _parse_opt_float(raw: str) -> Optional[float]:
+    """Convierte un string a float, devolviendo None si está vacío."""
+    s = raw.strip() if raw else ""
+    return float(s) if s else None
+
 
 def _read_csv(path: Path) -> List[dict]:
     """

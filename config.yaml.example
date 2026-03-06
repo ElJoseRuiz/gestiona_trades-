@@ -20,6 +20,7 @@ strategy:
   min_trades_ratio:   0                # filtro mínimo trades_ratio
   allowed_quintiles:  [1, 2, 3, 4, 5] # quintiles permitidos
   max_trades_per_pair: 1               # máx. trades abiertos en el mismo par
+  quarantine_hours:   4.0              # Horas de bloqueo para un par tras su último cierre
 
 signals:
   file_path:              "fut_pares_short.csv"  # ruta al fichero de señales
