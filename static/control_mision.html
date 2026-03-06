@@ -202,6 +202,7 @@
 // ─────────────────────────────────────────────────────────
 let trades     = [];   // todos los trades recibidos
 let ws         = null;
+let livePrices = new Map(); // symbol → markPrice (caché Binance)
 let wsRetry    = 1000;
 let fetchTimer = null;
 function requestTradesRefresh() {
@@ -277,26 +278,23 @@ function renderOpen() {
   }
 
   document.getElementById('tbl-open').innerHTML = open.map(t => {
-    // PnL estimado al TP para SHORT: (entry - tp) / entry * 100
-    const pnlEst = (t.entry_price && t.tp_price)
-      ? (+t.entry_price - +t.tp_price) / +t.entry_price * 100
-      : null;
     const sizeUsdt = (t.entry_price && t.entry_quantity)
       ? (+t.entry_price * +t.entry_quantity).toFixed(2)
       : '—';
-    return `<tr>
+    return `<tr data-pair="${t.pair}" data-entry="${t.entry_price || ''}">
       <td><b>${t.pair}</b></td>
       <td>${badge(t.status)}</td>
       <td>${sizeUsdt !== '—' ? sizeUsdt + ' $' : '—'}</td>
       <td>${fmtPrice(t.entry_price)}</td>
       <td>${fmtPrice(t.tp_price)} <span class="muted">(${fmtPrice(t.tp_trigger_price)})</span></td>
       <td>${fmtPrice(t.sl_price)} <span class="muted">(${fmtPrice(t.sl_trigger_price)})</span></td>
-      <td class="${pnlClass(pnlEst)}">${pnlEst !== null ? fmtPct(pnlEst) : '—'}</td>
+      <td class="muted">…</td>
       <td>${elapsed(t.entry_fill_ts || t.created_at)}</td>
       <td class="muted">${t.signal_data?.top || '—'}</td>
       <td class="muted">${t.signal_data?.categoria || '—'}</td>
     </tr>`;
   }).join('');
+  applyLivePnL();
 }
 
 function renderClosed() {
@@ -342,6 +340,33 @@ function setStat(id, val, cls='') {
   const el = document.getElementById(id);
   el.textContent = val;
   el.className = 'value' + (cls ? ' ' + cls : '');
+}
+
+// ─────────────────────────────────────────────────────────
+// PnL en vivo (mark price Binance Futures)
+// ─────────────────────────────────────────────────────────
+
+function applyLivePnL() {
+  document.querySelectorAll('#tbl-open tr[data-pair]').forEach(row => {
+    const entryPrice = parseFloat(row.dataset.entry);
+    const markPrice  = livePrices.get(row.dataset.pair);
+    if (!entryPrice || !markPrice) return;
+    const pnlPct = (entryPrice - markPrice) / entryPrice * 100;
+    const cell = row.cells[6];
+    if (!cell) return;
+    cell.textContent = (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(2) + '%';
+    cell.className   = pnlPct >= 0 ? 'pos' : 'neg';
+  });
+}
+
+async function updateLivePnL() {
+  try {
+    const r = await fetch('https://fapi.binance.com/fapi/v1/premiumIndex');
+    if (!r.ok) return;
+    const items = await r.json();
+    livePrices = new Map(items.map(item => [item.symbol, parseFloat(item.markPrice)]));
+    applyLivePnL();
+  } catch(e) { console.error('updateLivePnL', e); }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -518,6 +543,8 @@ async function fetchConfig() {
   await fetchStatus();
   await fetchConfig();
   connect();
+  updateLivePnL();                        // primera carga inmediata
+  setInterval(updateLivePnL, 300000);     // refresco cada 5 minutos
   // Fallback: refresh completo cada 30s si WS se desconecta
   setInterval(() => {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -525,7 +552,7 @@ async function fetchConfig() {
       fetchStatus();
     }
   }, 30000);
-  // Actualizar duraciones (elapsed) cada 10s
+  // Actualizar duraciones (elapsed) cada 10s — applyLivePnL se invoca desde renderOpen
   setInterval(() => {
     renderOpen();
   }, 10000);
