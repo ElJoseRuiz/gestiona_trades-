@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Analítica Histórica — Gestiona Trades</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0d0f1a;color:#c9cde0;font-family:'Consolas','Fira Code',monospace;font-size:13px;padding-bottom:30px}
+  .topbar{background:#141726;border-bottom:1px solid #232740;padding:10px 16px;display:flex;justify-content:space-between;align-items:center}
+  .topbar h1{font-size:15px;color:#e0e3f0;letter-spacing:1px}
+  .main{padding:16px;display:flex;flex-direction:column;gap:16px}
+
+  .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit, minmax(140px, 1fr));gap:12px}
+  .kpi-card{background:#141726;border:1px solid #232740;border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:4px}
+  .kpi-label{font-size:10px;color:#6b7294;text-transform:uppercase;letter-spacing:0.5px}
+  .kpi-val{font-size:18px;font-weight:bold;color:#e0e3f0}
+  .pos{color:#2dc653} .neg{color:#e63946}
+
+  .chart-grid{display:grid;grid-template-columns:1fr;gap:16px}
+  .chart-row-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .chart-container{background:#141726;border:1px solid #232740;border-radius:8px;padding:12px;position:relative;height:350px}
+  @media(max-width:900px){.chart-row-2{grid-template-columns:1fr}}
+
+  .badge{padding:3px 8px;border-radius:4px;background:#252850;color:#e0e3f0;text-decoration:none;font-size:11px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>📊 Analítica Histórica (Backtest Real)</h1>
+  <a href="/" class="badge">← Volver al Live Dashboard</a>
+</div>
+
+<div class="main">
+  <div class="kpi-grid">
+    <div class="kpi-card"><span class="kpi-label">Net Profit</span><span class="kpi-val" id="kpi-pnl">—</span></div>
+    <div class="kpi-card"><span class="kpi-label">Max Drawdown</span><span class="kpi-val neg" id="kpi-dd">—</span></div>
+    <div class="kpi-card"><span class="kpi-label">Total Trades</span><span class="kpi-val" id="kpi-trades">—</span></div>
+    <div class="kpi-card"><span class="kpi-label">Win Rate</span><span class="kpi-val" id="kpi-wr">—</span></div>
+    <div class="kpi-card"><span class="kpi-label">Profit Factor</span><span class="kpi-val" id="kpi-pf">—</span></div>
+    <div class="kpi-card"><span class="kpi-label">Avg Trade</span><span class="kpi-val" id="kpi-avg">—</span></div>
+  </div>
+
+  <div class="chart-grid">
+    <div class="chart-container" style="height: 400px;">
+      <canvas id="equityChart"></canvas>
+    </div>
+  </div>
+
+  <div class="chart-row-2">
+    <div class="chart-container"><canvas id="quintileChart"></canvas></div>
+    <div class="chart-container"><canvas id="momentumChart"></canvas></div>
+  </div>
+
+  <div class="chart-grid">
+    <div class="chart-container"><canvas id="pairChart"></canvas></div>
+  </div>
+</div>
+
+<script>
+Chart.defaults.color = '#8b8fa8';
+Chart.defaults.borderColor = '#232740';
+
+function pnlClass(v) { return v >= 0 ? 'pos' : 'neg'; }
+
+async function init() {
+  try {
+    const res = await fetch('/api/history_data');
+    const trades = await res.json();
+    if (!trades.length) return;
+
+    processData(trades);
+  } catch (e) { console.error("Error loading history", e); }
+}
+
+function processData(trades) {
+  // --- CORE MATH ---
+  let cumPnl = 0;
+  let peak = 0;
+  let maxDd = 0;
+  let wins = 0;
+  let grossProfit = 0;
+  let grossLoss = 0;
+
+  const labels = [];
+  const equityData = [];
+  const ddData = [];
+
+  // Categorical Aggregators
+  const byQuintile = {};
+  const byPair = {};
+  const byMomentum = { '>15%':0, '10-15%':0, '5-10%':0, '0-5%':0 };
+
+  trades.forEach((t, i) => {
+    const pnl = t.pnl_usdt || 0;
+    cumPnl += pnl;
+
+    if (pnl > 0) { wins++; grossProfit += pnl; }
+    else { grossLoss += Math.abs(pnl); }
+
+    if (cumPnl > peak) peak = cumPnl;
+    const currentDd = cumPnl - peak;
+    if (currentDd < maxDd) maxDd = currentDd;
+
+    // Arrays for Equity Chart
+    labels.push(t.exit_fill_ts ? t.exit_fill_ts.substring(5,16).replace('T', ' ') : `T#${i}`);
+    equityData.push(cumPnl);
+    ddData.push(currentDd);
+
+    // Aggregation: Quintile
+    const q = t.signal_data?.quintil || 'N/A';
+    byQuintile[`Q${q}`] = (byQuintile[`Q${q}`] || 0) + pnl;
+
+    // Aggregation: Pair
+    byPair[t.pair] = (byPair[t.pair] || 0) + pnl;
+
+    // Aggregation: Momentum 1h
+    const mom = t.signal_data?.mom_1h_pct || 0;
+    if (mom > 15) byMomentum['>15%'] += pnl;
+    else if (mom > 10) byMomentum['10-15%'] += pnl;
+    else if (mom > 5) byMomentum['5-10%'] += pnl;
+    else byMomentum['0-5%'] += pnl;
+  });
+
+  const pf = grossLoss > 0 ? (grossProfit / grossLoss) : grossProfit;
+  const wr = (wins / trades.length) * 100;
+  const avg = cumPnl / trades.length;
+
+  // --- RENDER KPIs ---
+  document.getElementById('kpi-pnl').textContent = cumPnl.toFixed(2) + ' USDT';
+  document.getElementById('kpi-pnl').className = 'kpi-val ' + pnlClass(cumPnl);
+  document.getElementById('kpi-dd').textContent = maxDd.toFixed(2) + ' USDT';
+  document.getElementById('kpi-trades').textContent = trades.length;
+  document.getElementById('kpi-wr').textContent = wr.toFixed(1) + '%';
+  document.getElementById('kpi-wr').className = 'kpi-val ' + (wr >= 50 ? 'pos' : 'neg');
+  document.getElementById('kpi-pf').textContent = pf.toFixed(2);
+  document.getElementById('kpi-avg').textContent = avg.toFixed(2) + ' USDT';
+
+  // --- CHART: EQUITY & DD ---
+  new Chart(document.getElementById('equityChart'), {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [
+        {
+          label: 'Cumulative PnL (USDT)',
+          data: equityData,
+          borderColor: '#64b5f6',
+          backgroundColor: '#64b5f620',
+          fill: true,
+          tension: 0.1,
+          yAxisID: 'y'
+        },
+        {
+          label: 'Drawdown',
+          data: ddData,
+          type: 'bar',
+          backgroundColor: '#e6394680',
+          yAxisID: 'y1'
+        }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { title: { display: true, text: 'Curva de Retorno y Drawdown' } },
+      scales: {
+        y: { position: 'left', grid: {color: '#232740'} },
+        y1: { position: 'right', max: 0, grid: {display: false} }
+      }
+    }
+  });
+
+  // --- CHART HELPERS ---
+  const createBarChart = (ctxId, title, dataObj) => {
+    const keys = Object.keys(dataObj).sort();
+    const vals = keys.map(k => dataObj[k]);
+    const bgColors = vals.map(v => v >= 0 ? '#2dc65380' : '#e6394680');
+    const borderColors = vals.map(v => v >= 0 ? '#2dc653' : '#e63946');
+
+    new Chart(document.getElementById(ctxId), {
+      type: 'bar',
+      data: {
+        labels: keys,
+        datasets: [{ label: 'PnL USDT', data: vals, backgroundColor: bgColors, borderColor: borderColors, borderWidth: 1 }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { title: { display: true, text: title }, legend: {display: false} },
+        scales: { y: { grid: {color: '#232740'} } }
+      }
+    });
+  };
+
+  // --- RENDER BAR CHARTS ---
+  createBarChart('quintileChart', 'Rendimiento por Quintil', byQuintile);
+  createBarChart('momentumChart', 'Rendimiento por Rango de Momentum (1h)', byMomentum);
+
+  // Sort pairs by PnL for better visualization
+  const sortedPairs = Object.entries(byPair).sort((a,b) => b[1] - a[1]);
+  const sortedByPairObj = {};
+  sortedPairs.forEach(([k,v]) => sortedByPairObj[k] = v);
+  createBarChart('pairChart', 'Rendimiento Neto por Activo', sortedByPairObj);
+}
+
+init();
+</script>
+</body>
+</html>

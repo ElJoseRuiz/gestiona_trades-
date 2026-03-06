@@ -97,6 +97,8 @@ class DashboardServer:
         self._app.router.add_get("/api/config",    self._handle_config)
         self._app.router.add_post("/api/trades/{id}/close", self._handle_close)
         self._app.router.add_get("/ws",            self._handle_ws)
+        self._app.router.add_get("/history",            self._handle_history)
+        self._app.router.add_get("/api/history_data",   self._handle_history_data)
 
     # ──────────────────────────────────────────────────────────────────
     # Ciclo de vida
@@ -200,6 +202,20 @@ class DashboardServer:
             "trade_id": trade_id,
             "note": "Cierre manual registrado — implementar en trade_engine",
         })
+
+    async def _handle_history(self, request: web.Request) -> web.Response:
+        html_path = _STATIC_DIR / "history.html"
+        if html_path.exists():
+            return web.FileResponse(html_path)
+        return web.Response(text="Dashboard histórico no encontrado", status=404)
+
+    async def _handle_history_data(self, request: web.Request) -> web.Response:
+        try:
+            trades = await self._db.get_closed_trades()
+            return web.json_response([_trade_to_dict(t) for t in trades])
+        except Exception as e:
+            log.error(f"Error exportando historia: {e}", exc_info=True)
+            return web.json_response({"error": str(e)}, status=500)
 
     async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=30)
