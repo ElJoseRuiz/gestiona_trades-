@@ -8,7 +8,7 @@
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:#0d0f1a;color:#c9cde0;font-family:'Consolas','Fira Code',monospace;font-size:13px;padding-bottom:30px}
-  .topbar{background:#141726;border-bottom:1px solid #232740;padding:10px 16px;display:flex;justify-content:space-between;align-items:center}
+  .topbar{background:#141726;border-bottom:1px solid #232740;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;}
   .topbar h1{font-size:15px;color:#e0e3f0;letter-spacing:1px}
   .main{padding:16px;display:flex;flex-direction:column;gap:16px}
 
@@ -24,6 +24,21 @@
   @media(max-width:900px){.chart-row-2{grid-template-columns:1fr}}
 
   .badge{padding:3px 8px;border-radius:4px;background:#252850;color:#e0e3f0;text-decoration:none;font-size:11px}
+
+  /* Controles de Filtro */
+  .filter-bar{background:#141726; border:1px solid #232740; padding:10px 16px; border-radius:8px; display:flex; gap:15px; align-items:center; flex-wrap:wrap;}
+  .filter-bar input{background:#0d0f1a; color:#c9cde0; border:1px solid #3a3d52; padding:5px 8px; border-radius:4px; font-family:inherit; color-scheme: dark;}
+  .btn{background:#252850; border:1px solid #3a3d52; color:#c9cde0; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit; transition:0.2s;}
+  .btn:hover{background:#3a3d52}
+
+  /* Botones Toggle Gráfico Principal */
+  .toggle-bar{display:flex; gap:10px; margin-bottom:10px;}
+  .toggle-btn{background:#1a1d2e; border:1px solid #2dc653; color:#2dc653; padding:4px 10px; border-radius:15px; cursor:pointer; font-size:11px; font-weight:bold;}
+  .toggle-btn.off{border-color:#4a4e6a; color:#4a4e6a; background:#141726;}
+  .toggle-btn.dd{border-color:#e63946; color:#e63946;}
+  .toggle-btn.dd.off{border-color:#4a4e6a; color:#4a4e6a;}
+  .toggle-btn.op{border-color:#f4a261; color:#f4a261;}
+  .toggle-btn.op.off{border-color:#4a4e6a; color:#4a4e6a;}
 </style>
 </head>
 <body>
@@ -34,6 +49,14 @@
 </div>
 
 <div class="main">
+  <div class="filter-bar">
+    <div style="font-weight:bold; color:#8b8fa8; font-size:11px; text-transform:uppercase;">Filtro de Rango:</div>
+    <label style="font-size:12px;">Desde: <input type="date" id="startDate"></label>
+    <label style="font-size:12px;">Hasta: <input type="date" id="endDate"></label>
+    <button class="btn" onclick="applyFilters()">Aplicar Filtro</button>
+    <button class="btn" onclick="resetFilters()">Reset Global</button>
+  </div>
+
   <div class="kpi-grid">
     <div class="kpi-card"><span class="kpi-label">Net Profit</span><span class="kpi-val" id="kpi-pnl">—</span></div>
     <div class="kpi-card"><span class="kpi-label">Max Drawdown</span><span class="kpi-val neg" id="kpi-dd">—</span></div>
@@ -44,7 +67,12 @@
   </div>
 
   <div class="chart-grid">
-    <div class="chart-container" style="height: 400px;">
+    <div class="chart-container" style="height: 420px; padding-top:40px;">
+      <div class="toggle-bar" style="position:absolute; top:12px; left:12px; z-index:10;">
+        <button id="btn-rend" class="toggle-btn" onclick="toggleDataset(0, 'btn-rend')">Curva Rendimiento (ON)</button>
+        <button id="btn-dd" class="toggle-btn dd" onclick="toggleDataset(1, 'btn-dd')">Drawdown (ON)</button>
+        <button id="btn-op" class="toggle-btn op" onclick="toggleDataset(2, 'btn-op')">Trades Abiertos (ON)</button>
+      </div>
       <canvas id="equityChart"></canvas>
     </div>
   </div>
@@ -55,6 +83,7 @@
   </div>
 
   <div class="chart-grid">
+    <div class="chart-container"><canvas id="categoryChart"></canvas></div>
     <div class="chart-container"><canvas id="pairChart"></canvas></div>
   </div>
 </div>
@@ -63,20 +92,72 @@
 Chart.defaults.color = '#8b8fa8';
 Chart.defaults.borderColor = '#232740';
 
+let allTrades = [];
+let chartInstances = {};
+
 function pnlClass(v) { return v >= 0 ? 'pos' : 'neg'; }
 
 async function init() {
   try {
     const res = await fetch('/api/history_data');
-    const trades = await res.json();
-    if (!trades.length) return;
+    allTrades = await res.json();
+    if (!allTrades.length) return;
 
-    processData(trades);
+    processData(allTrades);
   } catch (e) { console.error("Error loading history", e); }
 }
 
+function applyFilters() {
+  const start = document.getElementById('startDate').value;
+  const end = document.getElementById('endDate').value;
+
+  let filtered = allTrades;
+
+  if (start) {
+    const startTs = new Date(start).getTime();
+    filtered = filtered.filter(t => new Date(t.exit_fill_ts).getTime() >= startTs);
+  }
+
+  if (end) {
+    // Se añade un día en milisegundos para incluir todo el día de cierre
+    const endTs = new Date(end).getTime() + 86400000;
+    filtered = filtered.filter(t => new Date(t.exit_fill_ts).getTime() <= endTs);
+  }
+
+  processData(filtered);
+}
+
+function resetFilters() {
+  document.getElementById('startDate').value = '';
+  document.getElementById('endDate').value = '';
+  processData(allTrades);
+}
+
+// Lógica de apagado/encendido de líneas
+function toggleDataset(index, btnId) {
+  const chart = chartInstances['equityChart'];
+  if (!chart) return;
+
+  const meta = chart.getDatasetMeta(index);
+  meta.hidden = meta.hidden === null ? !chart.data.datasets[index].hidden : null;
+  chart.update();
+
+  const btn = document.getElementById(btnId);
+  if (meta.hidden) {
+    btn.classList.add('off');
+    btn.innerText = btn.innerText.replace('(ON)', '(OFF)');
+  } else {
+    btn.classList.remove('off');
+    btn.innerText = btn.innerText.replace('(OFF)', '(ON)');
+  }
+}
+
 function processData(trades) {
-  // --- CORE MATH ---
+  // Limpiar lienzos anteriores al recargar filtros
+  Object.values(chartInstances).forEach(chart => chart.destroy());
+  chartInstances = {};
+
+  // Matemáticas Globales
   let cumPnl = 0;
   let peak = 0;
   let maxDd = 0;
@@ -87,11 +168,29 @@ function processData(trades) {
   const labels = [];
   const equityData = [];
   const ddData = [];
+  const openTradesData = [];
 
-  // Categorical Aggregators
   const byQuintile = {};
   const byPair = {};
-  const byMomentum = { '>15%':0, '10-15%':0, '5-10%':0, '0-5%':0 };
+  const byCategory = {};
+
+  // Rangos granulares solicitados
+  const byMomentum = { '0-2%':0, '2-3%':0, '3-4%':0, '4-5%':0, '5-10%':0, '10-15%':0, '>15%':0 };
+
+  // Calculadora de concurrencia temporal
+  const getOpenTradesAt = (timestampStr) => {
+    const currentTs = new Date(timestampStr).getTime();
+    let count = 0;
+    for (let i = 0; i < trades.length; i++) {
+      const t = trades[i];
+      const entryTs = new Date(t.entry_fill_ts || t.created_at).getTime();
+      const exitTs = new Date(t.exit_fill_ts).getTime();
+      if (entryTs <= currentTs && currentTs <= exitTs) {
+        count++;
+      }
+    }
+    return count;
+  };
 
   trades.forEach((t, i) => {
     const pnl = t.pnl_usdt || 0;
@@ -104,31 +203,39 @@ function processData(trades) {
     const currentDd = cumPnl - peak;
     if (currentDd < maxDd) maxDd = currentDd;
 
-    // Arrays for Equity Chart
+    // Arrays para gráfico principal
     labels.push(t.exit_fill_ts ? t.exit_fill_ts.substring(5,16).replace('T', ' ') : `T#${i}`);
     equityData.push(cumPnl);
     ddData.push(currentDd);
+    openTradesData.push(t.exit_fill_ts ? getOpenTradesAt(t.exit_fill_ts) : 0);
 
-    // Aggregation: Quintile
+    // Agrupación: Quintil
     const q = t.signal_data?.quintil || 'N/A';
     byQuintile[`Q${q}`] = (byQuintile[`Q${q}`] || 0) + pnl;
 
-    // Aggregation: Pair
+    // Agrupación: Categoría (campo real: "categoria")
+    const cat = t.signal_data?.categoria || 'Otros';
+    byCategory[cat] = (byCategory[cat] || 0) + pnl;
+
+    // Agrupación: Par
     byPair[t.pair] = (byPair[t.pair] || 0) + pnl;
 
-    // Aggregation: Momentum 1h
+    // Agrupación: Momentum 1h
     const mom = t.signal_data?.mom_1h_pct || 0;
     if (mom > 15) byMomentum['>15%'] += pnl;
     else if (mom > 10) byMomentum['10-15%'] += pnl;
     else if (mom > 5) byMomentum['5-10%'] += pnl;
-    else byMomentum['0-5%'] += pnl;
+    else if (mom > 4) byMomentum['4-5%'] += pnl;
+    else if (mom > 3) byMomentum['3-4%'] += pnl;
+    else if (mom > 2) byMomentum['2-3%'] += pnl;
+    else byMomentum['0-2%'] += pnl;
   });
 
   const pf = grossLoss > 0 ? (grossProfit / grossLoss) : grossProfit;
-  const wr = (wins / trades.length) * 100;
-  const avg = cumPnl / trades.length;
+  const wr = trades.length > 0 ? (wins / trades.length) * 100 : 0;
+  const avg = trades.length > 0 ? cumPnl / trades.length : 0;
 
-  // --- RENDER KPIs ---
+  // Renderizar KPIs
   document.getElementById('kpi-pnl').textContent = cumPnl.toFixed(2) + ' USDT';
   document.getElementById('kpi-pnl').className = 'kpi-val ' + pnlClass(cumPnl);
   document.getElementById('kpi-dd').textContent = maxDd.toFixed(2) + ' USDT';
@@ -138,8 +245,10 @@ function processData(trades) {
   document.getElementById('kpi-pf').textContent = pf.toFixed(2);
   document.getElementById('kpi-avg').textContent = avg.toFixed(2) + ' USDT';
 
-  // --- CHART: EQUITY & DD ---
-  new Chart(document.getElementById('equityChart'), {
+  if (trades.length === 0) return;
+
+  // Gráfico de Serie Temporal (Equidad, DD, Trades Simultáneos)
+  chartInstances['equityChart'] = new Chart(document.getElementById('equityChart'), {
     type: 'line',
     data: {
       labels: labels,
@@ -147,8 +256,8 @@ function processData(trades) {
         {
           label: 'Cumulative PnL (USDT)',
           data: equityData,
-          borderColor: '#64b5f6',
-          backgroundColor: '#64b5f620',
+          borderColor: '#2dc653',
+          backgroundColor: '#2dc65320',
           fill: true,
           tension: 0.1,
           yAxisID: 'y'
@@ -159,28 +268,48 @@ function processData(trades) {
           type: 'bar',
           backgroundColor: '#e6394680',
           yAxisID: 'y1'
+        },
+        {
+          label: 'Trades Abiertos',
+          data: openTradesData,
+          type: 'line',
+          borderColor: '#f4a261',
+          backgroundColor: 'transparent',
+          borderWidth: 1.5,
+          tension: 0.2,
+          yAxisID: 'y2',
+          pointRadius: 0
         }
       ]
     },
     options: {
       responsive: true, maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
-      plugins: { title: { display: true, text: 'Curva de Retorno y Drawdown' } },
+      plugins: {
+        title: { display: false },
+        legend: { display: false } // Oculto intencionalmente para usar los custom toggles
+      },
       scales: {
-        y: { position: 'left', grid: {color: '#232740'} },
-        y1: { position: 'right', max: 0, grid: {display: false} }
+        y:  { position: 'left',  grid: {color: '#232740'}, title: {display:true, text:'PnL (USDT)', color:'#6b7294'} },
+        y1: { position: 'right', max: 0, grid: {display: false}, title: {display:true, text:'DD (USDT)', color:'#6b7294'} },
+        y2: { position: 'right', min: 0, grid: {display: false}, title: {display:true, text:'Concurrencia (Trades)', color:'#f4a261'} }
       }
     }
   });
 
-  // --- CHART HELPERS ---
+  // Generador genérico de gráficos de barras
   const createBarChart = (ctxId, title, dataObj) => {
-    const keys = Object.keys(dataObj).sort();
+    let keys = Object.keys(dataObj);
+    // Preservar orden lógico forzado para Momentum
+    if (ctxId === 'momentumChart') {
+      keys = ['0-2%', '2-3%', '3-4%', '4-5%', '5-10%', '10-15%', '>15%'];
+    }
+
     const vals = keys.map(k => dataObj[k]);
     const bgColors = vals.map(v => v >= 0 ? '#2dc65380' : '#e6394680');
     const borderColors = vals.map(v => v >= 0 ? '#2dc653' : '#e63946');
 
-    new Chart(document.getElementById(ctxId), {
+    chartInstances[ctxId] = new Chart(document.getElementById(ctxId), {
       type: 'bar',
       data: {
         labels: keys,
@@ -188,21 +317,23 @@ function processData(trades) {
       },
       options: {
         responsive: true, maintainAspectRatio: false,
-        plugins: { title: { display: true, text: title }, legend: {display: false} },
+        plugins: { title: { display: true, text: title, color: '#e0e3f0' }, legend: {display: false} },
         scales: { y: { grid: {color: '#232740'} } }
       }
     });
   };
 
-  // --- RENDER BAR CHARTS ---
+  // Instanciación de gráficos estáticos
   createBarChart('quintileChart', 'Rendimiento por Quintil', byQuintile);
   createBarChart('momentumChart', 'Rendimiento por Rango de Momentum (1h)', byMomentum);
 
-  // Sort pairs by PnL for better visualization
-  const sortedPairs = Object.entries(byPair).sort((a,b) => b[1] - a[1]);
-  const sortedByPairObj = {};
-  sortedPairs.forEach(([k,v]) => sortedByPairObj[k] = v);
-  createBarChart('pairChart', 'Rendimiento Neto por Activo', sortedByPairObj);
+  // Ordenar pares y categorías por mayor beneficio para lectura cómoda
+  const sortObj = (obj) => {
+    return Object.entries(obj).sort((a,b) => b[1] - a[1]).reduce((res, [k,v]) => { res[k] = v; return res; }, {});
+  };
+
+  createBarChart('categoryChart', 'Rendimiento Neto por Categoría', sortObj(byCategory));
+  createBarChart('pairChart', 'Rendimiento Neto por Activo', sortObj(byPair));
 }
 
 init();
