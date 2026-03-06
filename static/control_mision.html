@@ -160,7 +160,7 @@
             <th style="cursor:pointer" onclick="setSort('entry_price')"    data-sort="entry_price">Entry Price</th>
             <th style="cursor:pointer" onclick="setSort('tp_price')"       data-sort="tp_price">TP / Trigger</th>
             <th style="cursor:pointer" onclick="setSort('sl_price')"       data-sort="sl_price">SL / Trigger</th>
-            <th>PnL est. %</th>
+            <th style="cursor:pointer" onclick="setSort('pnl_est')" data-sort="pnl_est">PnL est. %</th>
             <th style="cursor:pointer" onclick="setSort('created_at')"     data-sort="created_at">Tiempo ▼</th>
             <th style="cursor:pointer" onclick="setSort('signal_data.top')" data-sort="signal_data.top">Señal top</th>
             <th style="cursor:pointer" onclick="setSort('signal_data.categoria')" data-sort="signal_data.categoria">Categoría</th>
@@ -302,7 +302,15 @@ function renderOpen() {
 
   open.sort((a, b) => {
     let valA, valB;
-    if (sortCol.startsWith('signal_data.')) {
+    if (sortCol === 'pnl_est') {
+      const calcPnl = t => {
+        const ep = parseFloat(t.entry_price);
+        const mp = livePrices.get(t.pair);
+        return (ep && mp) ? (ep - mp) / ep * 100 : -Infinity;
+      };
+      valA = calcPnl(a);
+      valB = calcPnl(b);
+    } else if (sortCol.startsWith('signal_data.')) {
       const key = sortCol.split('.')[1];
       valA = a.signal_data ? (a.signal_data[key] ?? 0) : 0;
       valB = b.signal_data ? (b.signal_data[key] ?? 0) : 0;
