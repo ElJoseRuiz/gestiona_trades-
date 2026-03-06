@@ -166,6 +166,20 @@ class StateDB:
             rows = await cursor.fetchall()
         return [_row_to_trade(r) for r in rows]
 
+    async def get_all_history_trades(self) -> list[Trade]:
+        """Extrae el histórico absoluto (abiertos y cerrados) para el cálculo de concurrencia."""
+        sql = "SELECT * FROM trades ORDER BY created_at ASC"
+        async with self._db.execute(sql) as cursor:
+            rows = await cursor.fetchall()
+        return [self._row_to_trade(r) for r in rows]
+
+    async def get_all_history_trades(self) -> list[Trade]:
+        """Extrae el histórico absoluto (abiertos y cerrados) para el cálculo de concurrencia."""
+        sql = "SELECT * FROM trades ORDER BY created_at ASC"
+        async with self._db.execute(sql) as cursor:
+            rows = await cursor.fetchall()
+        return [self._row_to_trade(r) for r in rows]
+
     async def get_trade(self, trade_id: str) -> Optional[Trade]:
         async with self._db.execute(
             "SELECT * FROM trades WHERE trade_id=?", (trade_id,)

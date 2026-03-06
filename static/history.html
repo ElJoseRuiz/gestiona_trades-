@@ -116,13 +116,18 @@ function applyFilters() {
 
   if (start) {
     const startTs = new Date(start).getTime();
-    filtered = filtered.filter(t => new Date(t.exit_fill_ts).getTime() >= startTs);
+    filtered = filtered.filter(t => {
+        if (t.status === 'closed') return new Date(t.exit_fill_ts).getTime() >= startTs;
+        return true; // Conservar trades abiertos en contexto visual
+    });
   }
 
   if (end) {
-    // Se añade un día en milisegundos para incluir todo el día de cierre
     const endTs = new Date(end).getTime() + 86400000;
-    filtered = filtered.filter(t => new Date(t.exit_fill_ts).getTime() <= endTs);
+    filtered = filtered.filter(t => {
+        if (t.status === 'closed') return new Date(t.exit_fill_ts).getTime() <= endTs;
+        return new Date(t.entry_fill_ts || t.created_at).getTime() <= endTs;
+    });
   }
 
   processData(filtered);
@@ -134,7 +139,6 @@ function resetFilters() {
   processData(allTrades);
 }
 
-// Lógica de apagado/encendido de líneas
 function toggleDataset(index, btnId) {
   const chart = chartInstances['equityChart'];
   if (!chart) return;
@@ -153,47 +157,45 @@ function toggleDataset(index, btnId) {
   }
 }
 
-function processData(trades) {
-  // Limpiar lienzos anteriores al recargar filtros
+function processData(filteredTrades) {
   Object.values(chartInstances).forEach(chart => chart.destroy());
   chartInstances = {};
 
-  // Matemáticas Globales
-  let cumPnl = 0;
-  let peak = 0;
-  let maxDd = 0;
-  let wins = 0;
-  let grossProfit = 0;
-  let grossLoss = 0;
+  // Aislar trades cerrados para el eje X cronológico
+  const closedTrades = filteredTrades
+    .filter(t => t.status === 'closed')
+    .sort((a,b) => (a.exit_fill_ts || '').localeCompare(b.exit_fill_ts || ''));
 
-  const labels = [];
-  const equityData = [];
-  const ddData = [];
-  const openTradesData = [];
+  let cumPnl = 0, peak = 0, maxDd = 0, wins = 0, grossProfit = 0, grossLoss = 0;
+  const labels = [], equityData = [], ddData = [], openTradesData = [];
 
-  const byQuintile = {};
-  const byPair = {};
-  const byCategory = {};
-
-  // Rangos granulares solicitados
+  const byQuintile = {}, byPair = {}, byCategory = {};
   const byMomentum = { '0-2%':0, '2-3%':0, '3-4%':0, '4-5%':0, '5-10%':0, '10-15%':0, '>15%':0 };
 
-  // Calculadora de concurrencia temporal
+  // Calculadora de concurrencia usando toda la matriz de datos
   const getOpenTradesAt = (timestampStr) => {
-    const currentTs = new Date(timestampStr).getTime();
-    let count = 0;
-    for (let i = 0; i < trades.length; i++) {
-      const t = trades[i];
-      const entryTs = new Date(t.entry_fill_ts || t.created_at).getTime();
-      const exitTs = new Date(t.exit_fill_ts).getTime();
-      if (entryTs <= currentTs && currentTs <= exitTs) {
-        count++;
+      const currentTs = new Date(timestampStr).getTime();
+      let count = 0;
+      for (let i=0; i<filteredTrades.length; i++) {
+          const t = filteredTrades[i];
+          if (['error', 'not_executed'].includes(t.status)) continue;
+
+          const entryTs = new Date(t.entry_fill_ts || t.created_at).getTime();
+          if (entryTs > currentTs) continue; // Abierto después de este punto
+
+          if (t.status === 'closed' && t.exit_fill_ts) {
+              const exitTs = new Date(t.exit_fill_ts).getTime();
+              // Es estrictamente <= para capturar el instante del cierre
+              if (currentTs <= exitTs) count++;
+          } else {
+              // Sigue abierto
+              count++;
+          }
       }
-    }
-    return count;
+      return count;
   };
 
-  trades.forEach((t, i) => {
+  closedTrades.forEach((t, i) => {
     const pnl = t.pnl_usdt || 0;
     cumPnl += pnl;
 
@@ -204,24 +206,20 @@ function processData(trades) {
     const currentDd = cumPnl - peak;
     if (currentDd < maxDd) maxDd = currentDd;
 
-    // Arrays para gráfico principal
     labels.push(t.exit_fill_ts ? t.exit_fill_ts.substring(5,16).replace('T', ' ') : `T#${i}`);
     equityData.push(cumPnl);
     ddData.push(currentDd);
     openTradesData.push(t.exit_fill_ts ? getOpenTradesAt(t.exit_fill_ts) : 0);
 
-    // Agrupación: Quintil
+    // Agregaciones
     const q = t.signal_data?.quintil || 'N/A';
     byQuintile[`Q${q}`] = (byQuintile[`Q${q}`] || 0) + pnl;
 
-    // Agrupación: Categoría (campo real: "categoria")
-    const cat = t.signal_data?.categoria || 'Otros';
+    const cat = t.signal_data?.cat || 'Otros';
     byCategory[cat] = (byCategory[cat] || 0) + pnl;
 
-    // Agrupación: Par
     byPair[t.pair] = (byPair[t.pair] || 0) + pnl;
 
-    // Agrupación: Momentum 1h
     const mom = t.signal_data?.mom_1h_pct || 0;
     if (mom > 15) byMomentum['>15%'] += pnl;
     else if (mom > 10) byMomentum['10-15%'] += pnl;
@@ -232,13 +230,27 @@ function processData(trades) {
     else byMomentum['0-2%'] += pnl;
   });
 
+  // Punto Sintético "AHORA"
+  let currentLiveOpen = 0;
+  filteredTrades.forEach(t => {
+      if (!['closed', 'error', 'not_executed'].includes(t.status)) currentLiveOpen++;
+  });
+
+  if (closedTrades.length > 0) {
+      labels.push('AHORA');
+      equityData.push(cumPnl);
+      ddData.push(maxDd);
+      openTradesData.push(currentLiveOpen);
+  }
+
+  // Matemáticas Finales basadas en Operaciones Finalizadas
   const pf = grossLoss > 0 ? (grossProfit / grossLoss) : grossProfit;
-  const wr = trades.length > 0 ? (wins / trades.length) * 100 : 0;
-  const avg = trades.length > 0 ? cumPnl / trades.length : 0;
+  const wr = closedTrades.length > 0 ? (wins / closedTrades.length) * 100 : 0;
+  const avg = closedTrades.length > 0 ? cumPnl / closedTrades.length : 0;
   const calmar = maxDd !== 0 ? Math.abs(cumPnl / maxDd) : (cumPnl > 0 ? 99.99 : 0);
 
-  // Renderizar KPIs
-  document.getElementById('kpi-trades').textContent = trades.length;
+  // Render KPIs
+  document.getElementById('kpi-trades').textContent = closedTrades.length;
   document.getElementById('kpi-wr').textContent = wr.toFixed(1) + '%';
   document.getElementById('kpi-wr').className = 'kpi-val ' + (wr >= 50 ? 'pos' : 'neg');
   document.getElementById('kpi-avg').textContent = avg.toFixed(2) + ' USDT';
@@ -250,9 +262,9 @@ function processData(trades) {
   document.getElementById('kpi-pf').textContent = pf.toFixed(2);
   document.getElementById('kpi-calmar').textContent = calmar.toFixed(2);
 
-  if (trades.length === 0) return;
+  if(closedTrades.length === 0) return;
 
-  // Gráfico de Serie Temporal (Equidad, DD, Trades Simultáneos)
+  // Gráfico Principal
   chartInstances['equityChart'] = new Chart(document.getElementById('equityChart'), {
     type: 'line',
     data: {
@@ -290,27 +302,21 @@ function processData(trades) {
     options: {
       responsive: true, maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
-      plugins: {
-        title: { display: false },
-        legend: { display: false } // Oculto intencionalmente para usar los custom toggles
-      },
+      plugins: { title: { display: false }, legend: { display: false } },
       scales: {
         y:  { position: 'left',  grid: {color: '#232740'}, title: {display:true, text:'PnL (USDT)', color:'#6b7294'} },
         y1: { position: 'right', max: 0, grid: {display: false}, title: {display:true, text:'DD (USDT)', color:'#6b7294'} },
-        y2: { position: 'right', min: 0, grid: {display: false}, title: {display:true, text:'Concurrencia (Trades)', color:'#f4a261'} }
+        y2: { position: 'right', min: 0, grid: {display: false}, title: {display:true, text:'Concurrencia', color:'#f4a261'} }
       }
     }
   });
 
-  // Generador genérico de gráficos de barras
   const createBarChart = (ctxId, title, dataObj) => {
     let keys = Object.keys(dataObj);
-    // Preservar orden lógico forzado para Momentum
-    if (ctxId === 'momentumChart') {
-      keys = ['0-2%', '2-3%', '3-4%', '4-5%', '5-10%', '10-15%', '>15%'];
+    if(ctxId === 'momentumChart') {
+        keys = ['0-2%', '2-3%', '3-4%', '4-5%', '5-10%', '10-15%', '>15%'];
     }
-
-    const vals = keys.map(k => dataObj[k]);
+    const vals = keys.map(k => dataObj[k] || 0);
     const bgColors = vals.map(v => v >= 0 ? '#2dc65380' : '#e6394680');
     const borderColors = vals.map(v => v >= 0 ? '#2dc653' : '#e63946');
 
@@ -328,14 +334,10 @@ function processData(trades) {
     });
   };
 
-  // Instanciación de gráficos estáticos
   createBarChart('quintileChart', 'Rendimiento por Quintil', byQuintile);
   createBarChart('momentumChart', 'Rendimiento por Rango de Momentum (1h)', byMomentum);
 
-  // Ordenar pares y categorías por mayor beneficio para lectura cómoda
-  const sortObj = (obj) => {
-    return Object.entries(obj).sort((a,b) => b[1] - a[1]).reduce((res, [k,v]) => { res[k] = v; return res; }, {});
-  };
+  const sortObj = (obj) => Object.entries(obj).sort((a,b) => b[1] - a[1]).reduce((res, [k,v]) => { res[k] = v; return res; }, {});
 
   createBarChart('categoryChart', 'Rendimiento Neto por Categoría', sortObj(byCategory));
   createBarChart('pairChart', 'Rendimiento Neto por Activo', sortObj(byPair));
