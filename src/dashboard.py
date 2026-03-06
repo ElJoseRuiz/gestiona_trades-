@@ -211,7 +211,8 @@ class DashboardServer:
 
     async def _handle_history_data(self, request: web.Request) -> web.Response:
         try:
-            trades = await self._db.get_closed_trades()
+            # Utilizamos todo el repositorio para calcular trades concurrentes
+            trades = await self._db.get_all_history_trades()
             return web.json_response([_trade_to_dict(t) for t in trades])
         except Exception as e:
             log.error(f"Error exportando historia: {e}", exc_info=True)
