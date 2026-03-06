@@ -134,6 +134,7 @@
     <div class="stat-chip"><span class="label">PnL total</span><span class="value" id="s-pnl-total">—</span></div>
     <div class="stat-chip"><span class="label">Trades hoy</span><span class="value" id="s-trades-today">—</span></div>
     <div class="stat-chip"><span class="label">Win Rate</span><span class="value" id="s-wr">—</span></div>
+    <div class="stat-chip"><span class="label">Unrealized PnL</span><span class="value" id="s-upnl">—</span></div>
     <div class="stat-chip"><span class="label">Uptime desde</span><span class="value" id="s-uptime" style="font-size:11px">—</span></div>
     <div style="width:1px;background:#2d3150;align-self:stretch;margin:0 4px"></div>
     <div class="stat-chip cfg-chip"><span class="label">Capital/Trade</span><span class="value" id="cfg-capital" style="font-size:13px">—</span></div>
@@ -330,14 +331,14 @@ function renderOpen() {
     const sizeUsdt = (t.entry_price && t.entry_quantity)
       ? (+t.entry_price * +t.entry_quantity).toFixed(2)
       : '—';
-    return `<tr data-pair="${t.pair}" data-entry="${t.entry_price || ''}">
+    return `<tr data-pair="${t.pair}" data-entry="${t.entry_price || ''}" data-qty="${t.entry_quantity || ''}">
       <td><b>${t.pair}</b></td>
       <td>${badge(t.status)}</td>
       <td>${sizeUsdt !== '—' ? sizeUsdt + ' $' : '—'}</td>
       <td>${fmtPrice(t.entry_price)}</td>
       <td>${fmtPrice(t.tp_price)} <span class="muted">(${fmtPrice(t.tp_trigger_price)})</span></td>
       <td>${fmtPrice(t.sl_price)} <span class="muted">(${fmtPrice(t.sl_trigger_price)})</span></td>
-      <td class="muted">…</td>
+      <td class="pnl-est-cell muted">…</td>
       <td>${elapsed(t.entry_fill_ts || t.created_at)}</td>
       <td class="muted">${t.signal_data?.top || '—'}</td>
       <td class="muted">${t.signal_data?.categoria || '—'}</td>
@@ -396,16 +397,36 @@ function setStat(id, val, cls='') {
 // ─────────────────────────────────────────────────────────
 
 function applyLivePnL() {
+  let totalUpnlUsdt  = 0;
+  let activeCount    = 0;
+
   document.querySelectorAll('#tbl-open tr[data-pair]').forEach(row => {
     const entryPrice = parseFloat(row.dataset.entry);
+    const qty        = parseFloat(row.dataset.qty);
     const markPrice  = livePrices.get(row.dataset.pair);
-    if (!entryPrice || !markPrice) return;
-    const pnlPct = (entryPrice - markPrice) / entryPrice * 100;
-    const cell = row.cells[6];
-    if (!cell) return;
+    const cell       = row.querySelector('.pnl-est-cell');
+    if (!entryPrice || !markPrice || !cell) return;
+
+    const pnlPct  = (entryPrice - markPrice) / entryPrice * 100;
     cell.textContent = (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(2) + '%';
-    cell.className   = pnlPct >= 0 ? 'pos' : 'neg';
+    cell.className   = 'pnl-est-cell ' + (pnlPct >= 0 ? 'pos' : 'neg');
+
+    if (qty) {
+      totalUpnlUsdt += (entryPrice - markPrice) * qty;
+      activeCount++;
+    }
   });
+
+  const upnlEl = document.getElementById('s-upnl');
+  if (upnlEl) {
+    if (activeCount > 0) {
+      upnlEl.textContent = (totalUpnlUsdt >= 0 ? '+' : '') + totalUpnlUsdt.toFixed(2) + ' USDT';
+      upnlEl.className   = 'value ' + (totalUpnlUsdt >= 0 ? 'pos' : 'neg');
+    } else {
+      upnlEl.textContent = '—';
+      upnlEl.className   = 'value';
+    }
+  }
 }
 
 async function updateLivePnL() {
