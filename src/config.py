@@ -94,6 +94,11 @@ class Config:
     def sl_posicion(self) -> bool:
         val = self._get("strategy", "SL_posicion", default=False)
         return str(val).lower() in ("true", "1", "t", "y", "yes")
+
+    @property
+    def min_tp_posicion_pct(self) -> float:
+        return float(self._get("strategy", "Min_TP_posicion", default=0.0))
+
     @property
     def trigger_offset_pct(self)  -> float:      return float(self._get("strategy", "trigger_offset_pct",default=10))
     @property
