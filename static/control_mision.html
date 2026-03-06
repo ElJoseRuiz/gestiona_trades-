@@ -153,9 +153,16 @@
       <table>
         <thead>
           <tr>
-            <th>Par</th><th>Estado</th><th>Size USDT</th><th>Entry Price</th>
-            <th>TP / Trigger</th><th>SL / Trigger</th>
-            <th>PnL est. %</th><th>Tiempo</th><th>Señal top</th><th>Categoría</th>
+            <th style="cursor:pointer" onclick="setSort('pair')"           data-sort="pair">Par</th>
+            <th style="cursor:pointer" onclick="setSort('status')"         data-sort="status">Estado</th>
+            <th style="cursor:pointer" onclick="setSort('entry_quantity')" data-sort="entry_quantity">Size USDT</th>
+            <th style="cursor:pointer" onclick="setSort('entry_price')"    data-sort="entry_price">Entry Price</th>
+            <th style="cursor:pointer" onclick="setSort('tp_price')"       data-sort="tp_price">TP / Trigger</th>
+            <th style="cursor:pointer" onclick="setSort('sl_price')"       data-sort="sl_price">SL / Trigger</th>
+            <th>PnL est. %</th>
+            <th style="cursor:pointer" onclick="setSort('created_at')"     data-sort="created_at">Tiempo ▼</th>
+            <th style="cursor:pointer" onclick="setSort('signal_data.top')" data-sort="signal_data.top">Señal top</th>
+            <th style="cursor:pointer" onclick="setSort('signal_data.categoria')" data-sort="signal_data.categoria">Categoría</th>
           </tr>
         </thead>
         <tbody id="tbl-open"><tr><td class="no-data" colspan="10">Sin trades abiertos</td></tr></tbody>
@@ -203,6 +210,8 @@
 let trades     = [];   // todos los trades recibidos
 let ws         = null;
 let livePrices = new Map(); // symbol → markPrice (caché Binance)
+let sortCol    = 'created_at';
+let sortAsc    = false;
 let wsRetry    = 1000;
 let fetchTimer = null;
 function requestTradesRefresh() {
@@ -261,13 +270,53 @@ function fmtTs(ts) {
 }
 
 // ─────────────────────────────────────────────────────────
+// Ordenación de tabla
+// ─────────────────────────────────────────────────────────
+
+function setSort(col) {
+  if (sortCol === col) {
+    sortAsc = !sortAsc;
+  } else {
+    sortCol = col;
+    sortAsc = true;
+  }
+  document.querySelectorAll('th[data-sort]').forEach(th => {
+    let text = th.innerText.replace(/ ▲| ▼/g, '');
+    if (th.getAttribute('data-sort') === sortCol) {
+      text += sortAsc ? ' ▲' : ' ▼';
+    }
+    th.innerText = text;
+  });
+  renderOpen();
+}
+
+// ─────────────────────────────────────────────────────────
 // Render tablas
 // ─────────────────────────────────────────────────────────
 
 function renderOpen() {
   const open = trades.filter(t =>
     ['open','opening','signal_received','closing'].includes(t.status)
-  ).sort((a,b) => (b.created_at || '').localeCompare(a.created_at || ''));
+  );
+
+  open.sort((a, b) => {
+    let valA, valB;
+    if (sortCol.startsWith('signal_data.')) {
+      const key = sortCol.split('.')[1];
+      valA = a.signal_data ? (a.signal_data[key] ?? 0) : 0;
+      valB = b.signal_data ? (b.signal_data[key] ?? 0) : 0;
+    } else {
+      valA = a[sortCol] ?? '';
+      valB = b[sortCol] ?? '';
+    }
+    let cmp = 0;
+    if (!isNaN(parseFloat(valA)) && !isNaN(parseFloat(valB))) {
+      cmp = parseFloat(valA) - parseFloat(valB);
+    } else {
+      cmp = String(valA).localeCompare(String(valB));
+    }
+    return sortAsc ? cmp : -cmp;
+  });
 
   document.getElementById('open-count').textContent = open.length;
 
