@@ -107,6 +107,8 @@ class Config:
     def allowed_quintiles(self)   -> List[int]:  return list(self._get("strategy",  "allowed_quintiles", default=[1,2,3,4,5]))
     @property
     def max_trades_per_pair(self) -> int:        return int(self._get("strategy",   "max_trades_per_pair",default=1))
+    @property
+    def quarantine_hours(self) -> float:         return float(self._get("strategy", "quarantine_hours",   default=4.0))
 
     # ──────────────────────────────────────────────────────────────────────
     # Signals

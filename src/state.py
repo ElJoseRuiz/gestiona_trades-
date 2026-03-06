@@ -173,12 +173,19 @@ class StateDB:
             rows = await cursor.fetchall()
         return [self._row_to_trade(r) for r in rows]
 
-    async def get_all_history_trades(self) -> list[Trade]:
-        """Extrae el histórico absoluto (abiertos y cerrados) para el cálculo de concurrencia."""
-        sql = "SELECT * FROM trades ORDER BY created_at ASC"
-        async with self._db.execute(sql) as cursor:
-            rows = await cursor.fetchall()
-        return [self._row_to_trade(r) for r in rows]
+    async def get_last_closed_time(self, pair: str) -> datetime | None:
+        """Devuelve el datetime del último cierre registrado para un par específico."""
+        sql = "SELECT exit_fill_ts FROM trades WHERE pair = ? AND status = 'closed' AND exit_fill_ts IS NOT NULL ORDER BY exit_fill_ts DESC LIMIT 1"
+        async with self._db.execute(sql, (pair,)) as cursor:
+            row = await cursor.fetchone()
+
+        if row and row[0]:
+            try:
+                ts_str = row[0].replace("Z", "+00:00")
+                return datetime.fromisoformat(ts_str)
+            except Exception as e:
+                log.error(f"Error parseando fecha de cuarentena para {pair} ({row[0]}): {e}")
+        return None
 
     async def get_trade(self, trade_id: str) -> Optional[Trade]:
         async with self._db.execute(

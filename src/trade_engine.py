@@ -414,6 +414,21 @@ class TradeEngine:
     # ──────────────────────────────────────────────────────────────────
 
     async def on_signal(self, sig: Signal):
+        # --- Control de Cuarentena ---
+        if self._cfg.quarantine_hours > 0:
+            last_closed = await self._db.get_last_closed_time(sig.pair)
+            if last_closed:
+                now_utc = datetime.now(timezone.utc)
+                if last_closed.tzinfo is None:
+                    last_closed = last_closed.replace(tzinfo=timezone.utc)
+                hours_since = (now_utc - last_closed).total_seconds() / 3600.0
+                if hours_since < self._cfg.quarantine_hours:
+                    log.info(
+                        f"Señal {sig.pair} descartada: CUARENTENA "
+                        f"(último cierre hace {hours_since:.2f}h, requiere {self._cfg.quarantine_hours}h)"
+                    )
+                    return
+
         # Límites globales
         if self.open_count >= self._cfg.max_open_trades:
             log.info(
