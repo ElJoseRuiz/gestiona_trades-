@@ -144,6 +144,14 @@
     <div class="stat-chip cfg-chip"><span class="label">SL %</span><span class="value cfg-val-sl" id="cfg-sl" style="font-size:13px">—</span></div>
   </div>
 
+  <!-- Switch agrupación -->
+  <div style="margin-bottom:15px;display:flex;align-items:center;gap:10px;background:#141726;padding:10px 15px;border-radius:8px;border:1px solid #232740;width:max-content;">
+    <label style="font-size:13px;color:#8b8fa8;cursor:pointer;display:flex;align-items:center;gap:8px;">
+      <input type="checkbox" id="group-switch" onchange="toggleGroupView(this.checked)" style="accent-color:#2dc653;width:16px;height:16px;cursor:pointer;">
+      <strong>Agrupar posiciones por Activo (Promediadas)</strong>
+    </label>
+  </div>
+
   <!-- Trades abiertos -->
   <div class="section">
     <div class="section-title">
@@ -213,6 +221,7 @@ let ws         = null;
 let livePrices = new Map(); // symbol → markPrice (caché Binance)
 let sortCol    = 'created_at';
 let sortAsc    = false;
+let isGrouped  = false;
 let wsRetry    = 1000;
 let fetchTimer = null;
 function requestTradesRefresh() {
@@ -271,6 +280,51 @@ function fmtTs(ts) {
 }
 
 // ─────────────────────────────────────────────────────────
+// Agrupación por par
+// ─────────────────────────────────────────────────────────
+
+function toggleGroupView(checked) {
+  isGrouped = checked;
+  if (typeof renderOpen   === 'function') renderOpen();
+  if (typeof renderClosed === 'function') renderClosed();
+}
+
+function getProcessedTrades(tradeList) {
+  if (!isGrouped) return tradeList;
+
+  const map = {};
+  tradeList.forEach(t => {
+    if (!map[t.pair]) {
+      map[t.pair] = {
+        is_grouped:     true,
+        count:          0,
+        pair:           t.pair,
+        status:         t.status,
+        total_val:      0,
+        entry_quantity: 0,
+        pnl_usdt:       0,
+        created_at:     t.created_at,
+        exit_fill_ts:   t.exit_fill_ts,
+        trade_id:       ''
+      };
+    }
+    const g = map[t.pair];
+    g.count++;
+    g.entry_quantity += (parseFloat(t.entry_quantity) || 0);
+    g.total_val      += (parseFloat(t.entry_price)    || 0) * (parseFloat(t.entry_quantity) || 0);
+    g.pnl_usdt       += (parseFloat(t.pnl_usdt)       || 0);
+    if ((t.created_at   || '') > (g.created_at   || '')) g.created_at   = t.created_at;
+    if ((t.exit_fill_ts || '') > (g.exit_fill_ts || '')) g.exit_fill_ts = t.exit_fill_ts;
+  });
+
+  return Object.values(map).map(g => {
+    g.entry_price = g.entry_quantity > 0 ? (g.total_val / g.entry_quantity) : 0;
+    g.trade_id    = `[${g.count} lotes]`;
+    return g;
+  });
+}
+
+// ─────────────────────────────────────────────────────────
 // Ordenación de tabla
 // ─────────────────────────────────────────────────────────
 
@@ -296,9 +350,9 @@ function setSort(col) {
 // ─────────────────────────────────────────────────────────
 
 function renderOpen() {
-  const open = trades.filter(t =>
+  const open = getProcessedTrades(trades.filter(t =>
     ['open','opening','signal_received','closing'].includes(t.status)
-  );
+  ));
 
   open.sort((a, b) => {
     let valA, valB;
@@ -348,18 +402,18 @@ function renderOpen() {
       <td>${fmtPrice(t.sl_price)} <span class="muted">(${fmtPrice(t.sl_trigger_price)})</span></td>
       <td class="pnl-est-cell muted">…</td>
       <td>${elapsed(t.entry_fill_ts || t.created_at)}</td>
-      <td class="muted">${t.signal_data?.top || '—'}</td>
-      <td class="muted">${t.signal_data?.categoria || '—'}</td>
+      <td class="muted">${t.is_grouped ? t.trade_id : (t.signal_data?.top || '—')}</td>
+      <td class="muted">${t.is_grouped ? '—' : (t.signal_data?.categoria || '—')}</td>
     </tr>`;
   }).join('');
   applyLivePnL();
 }
 
 function renderClosed() {
-  const closed = trades
-    .filter(t => ['closed','not_executed','error'].includes(t.status))
-    .sort((a,b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
-    .slice(0, 40);
+  const closed = getProcessedTrades(
+    trades.filter(t => ['closed','not_executed','error'].includes(t.status))
+  ).sort((a,b) => (b.updated_at || b.exit_fill_ts || '').localeCompare(a.updated_at || a.exit_fill_ts || ''))
+   .slice(0, 40);
 
   if (!closed.length) {
     document.getElementById('tbl-closed').innerHTML =
@@ -403,8 +457,8 @@ function renderClosed() {
     <td>${exitIcon(t)}</td>
     <td>${duration(t)}</td>
     <td class="muted">${fmtFees(t.fees_usdt)}</td>
-    <td class="muted">${t.signal_data?.top || '—'}</td>
-    <td class="muted">${t.signal_data?.categoria || '—'}</td>
+    <td class="muted">${t.is_grouped ? t.trade_id : (t.signal_data?.top || '—')}</td>
+    <td class="muted">${t.is_grouped ? '—' : (t.signal_data?.categoria || '—')}</td>
   </tr>`;
   }).join('');
 }
