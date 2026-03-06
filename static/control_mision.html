@@ -394,7 +394,7 @@ function renderOpen() {
       ? (+t.entry_price * +t.entry_quantity).toFixed(2)
       : '—';
     return `<tr data-pair="${t.pair}" data-entry="${t.entry_price || ''}" data-qty="${t.entry_quantity || ''}">
-      <td><b>${t.pair}</b></td>
+      <td><b>${t.pair}</b>${t.is_grouped ? ` <span class="muted">(${t.count})</span>` : ''}</td>
       <td>${badge(t.status)}</td>
       <td>${sizeUsdt !== '—' ? sizeUsdt + ' $' : '—'}</td>
       <td>${fmtPrice(t.entry_price)}</td>
@@ -447,7 +447,7 @@ function renderClosed() {
     }
 
     return `<tr>
-    <td><b>${t.pair}</b>${quarantineBadge}</td>
+    <td><b>${t.pair}</b>${t.is_grouped ? ` <span class="muted">(${t.count})</span>` : ''}${quarantineBadge}</td>
     <td>${badge(t.status)}</td>
     <td>${sizeUsdt !== '—' ? sizeUsdt + ' $' : '—'}</td>
     <td>${fmtPrice(t.entry_price)}</td>
