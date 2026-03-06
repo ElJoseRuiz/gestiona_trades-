@@ -11,6 +11,7 @@ strategy:
   sl_pct:             60               # stop loss %
   TP_posicion:        false            # Si true, cierra todos los trades del par al tocar TP
   SL_posicion:        false            # Si true, cierra todos los trades del par al tocar SL
+  Min_TP_posicion:    0.0              # PnL mínimo % combinado para disparar cascada TP (0 = deshabilitado)
   trigger_offset_pct: 10               # trigger N% antes del target (safety orders)
   timeout_hours:      24               # cerrar si no toca TP/SL en N horas
   top_n:              1                # cuántos ranks procesar (1=solo top1)
