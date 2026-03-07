@@ -958,26 +958,55 @@ class TradeEngine:
     async def _close_sibling_trades(self, pair: str, trigger_type: str, exclude_trade_id: str):
         """
         Cierra trades hermanos en cascada con un modelo Maker Progresivo.
-        Intento 1: LIMIT al Mid-Price (60s)
-        Intento 2: LIMIT a mitad de camino entre Mid-Price y Ask (60s)
-        Intento 3: MARKET (Liquidación remanente)
-        Desfase entre procesos: 5 segundos. Tolerante a condiciones de carrera -2011.
+        Evalúa el PnL combinado antes de disparar la cascada TP para respetar Min_TP_posicion.
         """
-        siblings = [
+        # 1. Identificar candidatos SIN bloquearlos aún
+        candidates = [
             t for t in self._trades.values()
             if t.pair == pair and t.status == TradeStatus.OPEN and t.trade_id != exclude_trade_id
         ]
+
+        if not candidates:
+            return
+
+        # 2. Validación de rentabilidad combinada (Solo para TP)
+        if trigger_type == "TP":
+            min_tp_pct = self._cfg.min_tp_posicion_pct
+            if min_tp_pct > 0:
+                try:
+                    bid = await self._order_mgr.get_best_bid(pair)
+                    ask = await self._order_mgr.get_best_ask(pair)
+                    mid_price = (bid + ask) / 2.0
+
+                    total_cost = sum(t.entry_price * t.entry_quantity for t in candidates)
+                    total_value = sum(mid_price * t.entry_quantity for t in candidates)
+
+                    if total_cost > 0:
+                        combined_pnl_pct = ((total_cost - total_value) / total_cost) * 100.0
+                        if combined_pnl_pct < min_tp_pct:
+                            log.info(f"Cascada TP abortada para {pair}: PnL combinado hermanos ({combined_pnl_pct:.2f}%) < Min_TP_posicion ({min_tp_pct:.2f}%)")
+                            return
+                except Exception as e:
+                    log.error(f"Error evaluando PnL combinado para {pair}: {e}")
+                    return
+
+        # 3. BLOQUEO SÍNCRONO: Previene carrera de doble ejecución
+        siblings = []
+        for t in candidates:
+            if t.status == TradeStatus.OPEN:
+                t.status = TradeStatus.CLOSING
+                t.touch()
+                siblings.append(t)
 
         if not siblings:
             return
 
         log.info(f"Cierre en cascada ({trigger_type}_posicion=True) para {len(siblings)} trades de {pair}")
 
-        async def process_one_sibling(t: Trade):
-            t.status = TradeStatus.CLOSING
-            t.touch()
+        for t in siblings:
             await self._db.save_trade(t)
 
+        async def process_one_sibling(t: Trade):
             await self._cancel_counterpart(t, "tp")
             await self._cancel_counterpart(t, "sl")
 
