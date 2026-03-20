@@ -42,6 +42,9 @@ def setup_logging(cfg: Config) -> None:
     ch.setFormatter(fmt)
     root.addHandler(ch)
 
+    for warning_msg in cfg.startup_warnings:
+        root.warning(warning_msg)
+
 
 def get_logger(name: str) -> logging.Logger:
     """
