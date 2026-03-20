@@ -931,6 +931,45 @@ Posibles causas (ver log):
 1. `max_open_trades` ya alcanzado
 2. `max_trades_per_pair` ya alcanzado para ese par
 3. Señal descartada por filtros (`min_momentum_pct`, `allowed_quintiles`, etc.)
+
+---
+
+## Actualizacion Integracion 2026-03
+
+El bot ya contempla un perfil externo en `estrategia/filtros_gestiona_trades.yaml`.
+
+Regla de prioridad efectiva:
+
+1. `estrategia/filtros_gestiona_trades.yaml`
+2. `config.yaml`
+3. defaults internos
+
+Campos del perfil que hoy ya se aplican:
+
+- `ejecucion.mode`
+- `gestion_trade.tp_pct`, `sl_pct`, `tp_pos`, `sl_pos`, `max_hold`
+- `limites.max_par`, `max_global`
+- `filtros_entrada.rank_min`, `rank_max`
+- `filtros_entrada.momentum_min`, `momentum_max`
+- `filtros_entrada.vol_ratio_min`, `vol_ratio_max`
+- `filtros_entrada.trades_ratio_min`, `trades_ratio_max`
+- `filtros_entrada.bp_min`, `bp_max`
+- `filtros_entrada.quintiles`, `categorias`
+- `filtros_entrada.hora_min`, `hora_max`, `dias_semana`
+- `filtros_entrada.filtro_overlap`
+- `filtros_entrada.ignore_n`, `ignore_h`
+
+Formato actual esperado para `fut_pares_short.csv`:
+
+```csv
+fecha_hora,par,rank,close,mom_pct,vol_ratio,trades_ratio,quintil,bp,categoria,leido
+```
+
+Notas de compatibilidad:
+
+- `config.yaml` sigue mandando en credenciales, rutas, logging y base de datos.
+- Los filtros legacy de `strategy` siguen existiendo, pero si el perfil YAML trae el campo equivalente, el perfil tiene prioridad.
+- `macro_btc`, `global_tp` y `kill_switch_pf` se parsean, pero si quedan activos y no estan soportados se deja log explicito y se aplica politica conservadora.
 4. Chase loop agotado sin fill (`NOT_EXECUTED`)
 5. Balance insuficiente en Binance para `capital_per_trade`
 

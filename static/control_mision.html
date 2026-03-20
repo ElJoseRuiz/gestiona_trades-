@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
@@ -119,6 +119,8 @@
       <span><span class="dot" id="dot-ws-binance"></span>Binance WS</span>
       <span><span class="dot" id="dot-ws-dash"></span>Dashboard WS</span>
     </div>
+    <div class="stat-chip cfg-chip"><span class="label">Perfil YAML</span><span class="value" id="cfg-profile" style="font-size:13px">—</span></div>
+    <div class="stat-chip cfg-chip"><span class="label">Filtros Entrada</span><span class="value" id="cfg-filters" style="font-size:13px">—</span></div>
   </div>
   <div style="font-size:11px;color:#4a4e6a" id="last-update">—</div>
 </div>
@@ -677,6 +679,8 @@ async function fetchConfig() {
     if (!r.ok) return;
     const cfg = await r.json();
     const s = cfg.strategy || {};
+    const filters = cfg.effective_filters_entrada || {};
+    const profileMeta = cfg.filtros_gestiona_trades_meta || {};
     const setEl = (id, val) => {
       const el = document.getElementById(id);
       if (el) el.textContent = val != null ? val : '—';
@@ -686,7 +690,7 @@ async function fetchConfig() {
     setEl('cfg-max-pair', s.max_trades_per_pair != null ? s.max_trades_per_pair : '—');
     setEl('cfg-tp',       s.tp_pct != null ? s.tp_pct + '%' : '—');
     setEl('cfg-sl',       s.sl_pct != null ? s.sl_pct + '%' : '—');
-    const tpPos = s.TP_posicion;
+    const tpPos = s.tp_pos != null ? s.tp_pos : s.TP_posicion;
     const tpPosEl = document.getElementById('cfg-tp-posicion');
     if (tpPosEl) {
       tpPosEl.textContent = tpPos != null ? (tpPos ? 'ON' : 'OFF') : '—';
@@ -695,6 +699,20 @@ async function fetchConfig() {
     const minChip = document.getElementById('cfg-min-tp-chip');
     if (minChip) minChip.style.display = tpPos ? '' : 'none';
     setEl('cfg-min-tp-posicion', s.Min_TP_posicion != null ? s.Min_TP_posicion + '%' : '—');
+    setEl('cfg-profile', profileMeta.loaded ? 'Activo' : 'No cargado');
+    const summary = [];
+    if (filters.rank_min != null || filters.rank_max != null) {
+      summary.push(`rank ${filters.rank_min ?? '-'}-${filters.rank_max ?? '-'}`);
+    }
+    if (filters.categorias && filters.categorias.length) {
+      summary.push(`${filters.categorias.length} cat`);
+    }
+    if (filters.quintiles && filters.quintiles.length) {
+      summary.push(filters.quintiles.join('/'));
+    }
+    if (filters.filtro_overlap) summary.push('overlap');
+    if (filters.ignore_n) summary.push(`ignore ${filters.ignore_n}`);
+    setEl('cfg-filters', summary.length ? summary.join(' | ') : 'Base');
   } catch(e) { console.error('fetchConfig', e); }
 }
 
@@ -724,3 +742,4 @@ async function fetchConfig() {
 </script>
 </body>
 </html>
+

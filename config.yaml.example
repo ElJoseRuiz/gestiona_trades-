@@ -1,57 +1,62 @@
 binance:
-  api_key:    "YOUR_API_KEY_HERE"
+  api_key: "YOUR_API_KEY_HERE"
   api_secret: "YOUR_API_SECRET_HERE"
-  base_url:   "https://fapi.binance.com"   # producción real
+  base_url: "https://fapi.binance.com"   # produccion real
 
 strategy:
-  mode:               "short"          # "short" | "long"  (solo short por ahora)
-  capital_per_trade:  10               # USDT por trade
-  max_open_trades:    10               # máximo trades abiertos simultáneamente
-  tp_pct:             15               # take profit %
-  sl_pct:             60               # stop loss %
-  TP_posicion:        false            # Si true, cierra todos los trades del par al tocar TP
-  SL_posicion:        false            # Si true, cierra todos los trades del par al tocar SL
-  Min_TP_posicion:    0.0              # PnL mínimo % combinado para disparar cascada TP (0 = deshabilitado)
-  trigger_offset_pct: 10               # trigger N% antes del target (safety orders)
-  timeout_hours:      24               # cerrar si no toca TP/SL en N horas
-  top_n:              1                # cuántos ranks procesar (1=solo top1)
-  leverage:           1                # apalancamiento (1 = sin apalancamiento)
-  min_momentum_pct:   0                # filtro mínimo mom_1h_pct
-  min_vol_ratio:      0                # filtro mínimo vol_ratio
-  min_trades_ratio:   0                # filtro mínimo trades_ratio
-  allowed_quintiles:  [1, 2, 3, 4, 5] # quintiles permitidos
-  max_trades_per_pair: 1               # máx. trades abiertos en el mismo par
-  quarantine_hours:   4.0              # Horas de bloqueo para un par tras su último cierre
+  mode: "short"                # "short" | "long" (solo short por ahora)
+  capital_per_trade: 10        # USDT por trade
+  max_open_trades: 10          # maximo trades abiertos simultaneamente
+  tp_pct: 15                   # take profit %
+  sl_pct: 60                   # stop loss %
+  TP_posicion: false           # Si true, cierra todos los trades del par al tocar TP
+  SL_posicion: false           # Si true, cierra todos los trades del par al tocar SL
+  Min_TP_posicion: 0.0         # PnL minimo % combinado para disparar cascada TP (0 = deshabilitado)
+  trigger_offset_pct: 10       # Compatibilidad historica; no se aplica hoy
+  timeout_hours: 24            # Cerrar si no toca TP/SL en N horas
+  top_n: 1                     # Cuantos ranks procesar (1 = solo top1)
+  leverage: 1                  # Apalancamiento (1 = sin apalancamiento)
+  min_momentum_pct: 0          # Compat legacy: si hay perfil, momentum_min pisa este valor
+  min_vol_ratio: 0             # Compat legacy: si hay perfil, vol_ratio_min pisa este valor
+  min_trades_ratio: 0          # Compat legacy: si hay perfil, trades_ratio_min pisa este valor
+  allowed_quintiles: [1, 2, 3, 4, 5]   # Compat legacy: si hay perfil, usa quintiles del YAML exportado
+  max_trades_per_pair: 1
+  quarantine_hours: 4.0
+
+strategy_profile:
+  path: "estrategia/filtros_gestiona_trades.yaml"   # perfil exportado por dashboard_top5.html
 
 signals:
-  file_path:              "fut_pares_short.csv"  # ruta al fichero de señales
-  poll_interval_seconds:  15                     # cada cuánto revisar el fichero
-  max_signal_age_minutes: 10                     # señales más viejas → "timeout"
+  file_path: "fut_pares_short.csv"
+  poll_interval_seconds: 15
+  max_signal_age_minutes: 10
+  # Formato actual esperado:
+  # fecha_hora,par,rank,close,mom_pct,vol_ratio,trades_ratio,quintil,bp,categoria,leido
 
 entry:
-  order_type:             "BBO"        # "BBO" (recomendado) | "LIMIT_GTX"
-  chase_interval_seconds: 2            # re-colocar limit cada N segundos
-  chase_timeout_seconds:  30           # cancelar si no fill en N segundos
-  max_chase_attempts:     3            # máx. reintentos antes de descartar
-  market_fallback:        false        # usar MARKET si BBO no llena tras todos los intentos
+  order_type: "BBO"            # "BBO" (recomendado) | "LIMIT_GTX"
+  chase_interval_seconds: 2
+  chase_timeout_seconds: 30
+  max_chase_attempts: 3
+  market_fallback: false
 
 exit:
-  timeout_order_type:     "BBO"        # "BBO" (recomendado) | "LIMIT" | "MARKET"
-  timeout_chase_seconds:  30           # tiempo para intentar BBO/LIMIT antes de market
-  timeout_market_fallback: true        # usar MARKET si BBO/LIMIT no se llena
-  sl_mark_poll_interval:  1.0          # cada cuántos segundos sondear mark price para SL
+  timeout_order_type: "BBO"    # "BBO" (recomendado) | "LIMIT" | "MARKET"
+  timeout_chase_seconds: 30
+  timeout_market_fallback: true
+  sl_mark_poll_interval: 1.0
 
 dashboard:
   enabled: true
-  host:    "0.0.0.0"
-  port:    8080
+  host: "0.0.0.0"
+  port: 8080
 
 logging:
-  level:         "DEBUG"                  # nivel para fichero (captura todo)
-  file:          "logs/gestiona_trades.log"
-  max_bytes:     10485760                 # 10 MB
-  backup_count:  5
-  console_level: "INFO"                   # nivel para consola
+  level: "DEBUG"
+  file: "logs/gestiona_trades.log"
+  max_bytes: 10485760
+  backup_count: 5
+  console_level: "INFO"
 
 database:
   path: "data/trades.db"

@@ -9,11 +9,21 @@ from typing import Any, List
 
 import yaml
 
+from .filtros_gestiona_trades import (
+    DEFAULT_PROFILE_PATH,
+    FiltrosGestionaTradesProfile,
+    load_filtros_gestiona_trades,
+)
+
 
 class Config:
     def __init__(self, path: str = "config.yaml"):
         self._path = Path(path)
         self._d: dict = {}
+        self._profile: FiltrosGestionaTradesProfile = FiltrosGestionaTradesProfile(
+            path=Path(DEFAULT_PROFILE_PATH)
+        )
+        self._startup_warnings: List[str] = []
         self.load()
 
     # ──────────────────────────────────────────────────────────────────────
@@ -26,6 +36,10 @@ class Config:
         with open(self._path, encoding="utf-8") as f:
             self._d = yaml.safe_load(f) or {}
         self._validate()
+        profile_path = self._get("strategy_profile", "path", default=DEFAULT_PROFILE_PATH)
+        self._profile = load_filtros_gestiona_trades(profile_path)
+        self._startup_warnings = list(self._profile.warnings)
+        self._startup_warnings.extend(self._build_profile_feature_warnings())
 
     def _validate(self):
         required = [
@@ -53,6 +67,142 @@ class Config:
                 return default
         return d
 
+    def _profile_get(self, *keys, default=None) -> Any:
+        d: Any = self._profile.normalized
+        for k in keys:
+            if not isinstance(d, dict):
+                return default
+            d = d.get(k)
+            if d is None:
+                return default
+        return d
+
+    def _profile_has(self, *keys) -> bool:
+        d: Any = self._profile.raw
+        for k in keys:
+            if not isinstance(d, dict) or k not in d:
+                return False
+            d = d[k]
+        return True
+
+    def _effective_value(self,
+                         profile_keys: tuple[str, ...],
+                         config_keys: tuple[str, ...],
+                         default=None) -> Any:
+        if self._profile_has(*profile_keys):
+            profile_value = self._profile_get(*profile_keys, default=None)
+            if profile_value is not None:
+                return profile_value
+        return self._get(*config_keys, default=default)
+
+    @staticmethod
+    def _as_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value).lower() in ("true", "1", "t", "y", "yes")
+
+    def _effective_strategy_dict(self) -> dict[str, Any]:
+        strategy = dict(self._d.get("strategy", {}))
+        strategy["mode"] = self.mode
+        strategy["max_open_trades"] = self.max_open_trades
+        strategy["tp_pct"] = self.tp_pct
+        strategy["sl_pct"] = self.sl_pct
+        strategy["TP_posicion"] = self.tp_posicion
+        strategy["SL_posicion"] = self.sl_posicion
+        strategy["tp_pos"] = self.tp_posicion
+        strategy["sl_pos"] = self.sl_posicion
+        strategy["timeout_hours"] = self.timeout_hours
+        strategy["max_hold"] = self.timeout_hours
+        strategy["max_trades_per_pair"] = self.max_trades_per_pair
+        return strategy
+
+    def _effective_filters_dict(self) -> dict[str, Any]:
+        return {
+            "rank_min": self.signal_rank_min,
+            "rank_max": self.signal_rank_max,
+            "momentum_min": self.signal_momentum_min,
+            "momentum_max": self.signal_momentum_max,
+            "vol_ratio_min": self.signal_vol_ratio_min,
+            "vol_ratio_max": self.signal_vol_ratio_max,
+            "trades_ratio_min": self.signal_trades_ratio_min,
+            "trades_ratio_max": self.signal_trades_ratio_max,
+            "bp_min": self.signal_bp_min,
+            "bp_max": self.signal_bp_max,
+            "hora_min": self.signal_hora_min,
+            "hora_max": self.signal_hora_max,
+            "dias_semana": self.signal_dias_semana,
+            "quintiles": self.signal_allowed_quintile_labels,
+            "categorias": self.signal_allowed_categories,
+            "filtro_overlap": self.signal_filter_overlap,
+            "ignore_n": self.signal_ignore_n,
+            "ignore_h": self.signal_ignore_h,
+        }
+
+    @staticmethod
+    def _normalize_quintile_labels(values: list[Any]) -> list[str]:
+        labels: list[str] = []
+        for value in values:
+            if value is None or value == "":
+                continue
+            if isinstance(value, (int, float)):
+                int_value = int(value)
+                if 1 <= int_value <= 5:
+                    labels.append(f"Q{int_value}")
+                continue
+            text = str(value).strip().upper()
+            if not text:
+                continue
+            if text.isdigit() and 1 <= int(text) <= 5:
+                labels.append(f"Q{int(text)}")
+                continue
+            if text.startswith("Q") and text[1:].isdigit() and 1 <= int(text[1:]) <= 5:
+                labels.append(text)
+        # Mantener orden sin duplicados
+        return list(dict.fromkeys(labels))
+
+    def _build_profile_feature_warnings(self) -> List[str]:
+        warnings: List[str] = []
+
+        if self.profile_global_tp is not None:
+            if self.profile_global_tp_win:
+                warnings.append(
+                    "gestion_trade.global_tp/global_tp_win cargados, pero todavia no estan soportados; "
+                    "se dejan inactivos."
+                )
+            else:
+                warnings.append(
+                    "gestion_trade.global_tp cargado, pero todavia no esta soportado; se deja inactivo."
+                )
+        elif self.profile_global_tp_win:
+            warnings.append(
+                "gestion_trade.global_tp_win=true sin global_tp; no tendra efecto."
+            )
+
+        if self.profile_kill_switch_enabled:
+            warnings.append(
+                "kill_switch_pf.enabled=true cargado, pero todavia no esta soportado; se deja inactivo."
+            )
+
+        if self.profile_btc_filter_active and self.profile_btc_reverso:
+            warnings.append(
+                "macro_btc activo con btc_reverso=true, pero el bot actual no soporta filtro BTC ni invertir "
+                "a long; las senales se rechazaran por seguridad."
+            )
+        elif self.profile_btc_filter_active:
+            warnings.append(
+                "macro_btc activo, pero el bot actual no soporta filtro BTC; las senales se rechazaran por seguridad."
+            )
+        elif self.profile_btc_reverso:
+            warnings.append(
+                "macro_btc.btc_reverso=true sin filtro BTC activo; no tendra efecto."
+            )
+
+        return warnings
+
     # ──────────────────────────────────────────────────────────────────────
     # Binance
     # ──────────────────────────────────────────────────────────────────────
@@ -76,24 +226,28 @@ class Config:
     # ──────────────────────────────────────────────────────────────────────
 
     @property
-    def mode(self)                -> str:        return self._get("strategy", "mode",               default="short")
+    def mode(self) -> str:
+        return str(self._effective_value(("ejecucion", "mode"), ("strategy", "mode"), default="short"))
     @property
     def capital_per_trade(self)   -> float:      return float(self._get("strategy", "capital_per_trade", default=10))
     @property
-    def max_open_trades(self)     -> int:        return int(self._get("strategy",   "max_open_trades",   default=10))
+    def max_open_trades(self) -> int:
+        return int(self._effective_value(("limites", "max_global"), ("strategy", "max_open_trades"), default=10))
     @property
-    def tp_pct(self)              -> float:      return float(self._get("strategy", "tp_pct",            default=15))
+    def tp_pct(self) -> float:
+        return float(self._effective_value(("gestion_trade", "tp_pct"), ("strategy", "tp_pct"), default=15))
     @property
-    def sl_pct(self)              -> float:      return float(self._get("strategy", "sl_pct",            default=60))
+    def sl_pct(self) -> float:
+        return float(self._effective_value(("gestion_trade", "sl_pct"), ("strategy", "sl_pct"), default=60))
     @property
     def tp_posicion(self) -> bool:
-        val = self._get("strategy", "TP_posicion", default=False)
-        return str(val).lower() in ("true", "1", "t", "y", "yes")
+        val = self._effective_value(("gestion_trade", "tp_pos"), ("strategy", "TP_posicion"), default=False)
+        return self._as_bool(val, default=False)
 
     @property
     def sl_posicion(self) -> bool:
-        val = self._get("strategy", "SL_posicion", default=False)
-        return str(val).lower() in ("true", "1", "t", "y", "yes")
+        val = self._effective_value(("gestion_trade", "sl_pos"), ("strategy", "SL_posicion"), default=False)
+        return self._as_bool(val, default=False)
 
     @property
     def min_tp_posicion_pct(self) -> float:
@@ -102,7 +256,8 @@ class Config:
     @property
     def trigger_offset_pct(self)  -> float:      return float(self._get("strategy", "trigger_offset_pct",default=10))
     @property
-    def timeout_hours(self)       -> float:      return float(self._get("strategy", "timeout_hours",     default=24))
+    def timeout_hours(self) -> float:
+        return float(self._effective_value(("gestion_trade", "max_hold"), ("strategy", "timeout_hours"), default=24))
     @property
     def top_n(self)               -> int:        return int(self._get("strategy",   "top_n",             default=1))
     @property
@@ -116,7 +271,8 @@ class Config:
     @property
     def allowed_quintiles(self)   -> List[int]:  return list(self._get("strategy",  "allowed_quintiles", default=[1,2,3,4,5]))
     @property
-    def max_trades_per_pair(self) -> int:        return int(self._get("strategy",   "max_trades_per_pair",default=1))
+    def max_trades_per_pair(self) -> int:
+        return int(self._effective_value(("limites", "max_par"), ("strategy", "max_trades_per_pair"), default=1))
     @property
     def quarantine_hours(self) -> float:         return float(self._get("strategy", "quarantine_hours",   default=4.0))
 
@@ -130,6 +286,111 @@ class Config:
     def poll_interval_seconds(self)      -> float: return float(self._get("signals", "poll_interval_seconds",  default=15))
     @property
     def max_signal_age_minutes(self)     -> float: return float(self._get("signals", "max_signal_age_minutes", default=10))
+
+    @property
+    def signal_rank_min(self) -> int | None:
+        return self._profile_get("filtros_entrada", "rank_min", default=None)
+
+    @property
+    def signal_rank_max(self) -> int | None:
+        return self._profile_get("filtros_entrada", "rank_max", default=None)
+
+    @property
+    def signal_momentum_min(self) -> float:
+        return float(self._effective_value(("filtros_entrada", "momentum_min"), ("strategy", "min_momentum_pct"), default=0))
+
+    @property
+    def signal_momentum_max(self) -> float | None:
+        return self._profile_get("filtros_entrada", "momentum_max", default=None)
+
+    @property
+    def signal_vol_ratio_min(self) -> float:
+        return float(self._effective_value(("filtros_entrada", "vol_ratio_min"), ("strategy", "min_vol_ratio"), default=0))
+
+    @property
+    def signal_vol_ratio_max(self) -> float | None:
+        return self._profile_get("filtros_entrada", "vol_ratio_max", default=None)
+
+    @property
+    def signal_trades_ratio_min(self) -> float:
+        return float(self._effective_value(("filtros_entrada", "trades_ratio_min"), ("strategy", "min_trades_ratio"), default=0))
+
+    @property
+    def signal_trades_ratio_max(self) -> float | None:
+        return self._profile_get("filtros_entrada", "trades_ratio_max", default=None)
+
+    @property
+    def signal_bp_min(self) -> float | None:
+        return self._profile_get("filtros_entrada", "bp_min", default=None)
+
+    @property
+    def signal_bp_max(self) -> float | None:
+        return self._profile_get("filtros_entrada", "bp_max", default=None)
+
+    @property
+    def signal_hora_min(self) -> int | None:
+        return self._profile_get("filtros_entrada", "hora_min", default=None)
+
+    @property
+    def signal_hora_max(self) -> int | None:
+        return self._profile_get("filtros_entrada", "hora_max", default=None)
+
+    @property
+    def signal_dias_semana(self) -> List[int]:
+        days = self._profile_get("filtros_entrada", "dias_semana", default=[])
+        return list(days) if isinstance(days, list) else []
+
+    @property
+    def signal_allowed_quintile_labels(self) -> List[str]:
+        profile_quintiles = self._profile_get("filtros_entrada", "quintiles", default=[])
+        if isinstance(profile_quintiles, list):
+            return self._normalize_quintile_labels(profile_quintiles)
+        legacy_quintiles = self._get("strategy", "allowed_quintiles", default=[1, 2, 3, 4, 5])
+        if isinstance(legacy_quintiles, list):
+            return self._normalize_quintile_labels(legacy_quintiles)
+        return []
+
+    @property
+    def signal_allowed_categories(self) -> List[str]:
+        categories = self._profile_get("filtros_entrada", "categorias", default=[])
+        if not isinstance(categories, list):
+            return []
+        return [str(category).strip() for category in categories if str(category).strip()]
+
+    @property
+    def signal_filter_overlap(self) -> bool:
+        return bool(self._profile_get("filtros_entrada", "filtro_overlap", default=False))
+
+    @property
+    def signal_ignore_n(self) -> int:
+        return int(self._profile_get("filtros_entrada", "ignore_n", default=0) or 0)
+
+    @property
+    def signal_ignore_h(self) -> float:
+        return float(self._profile_get("filtros_entrada", "ignore_h", default=0.0) or 0.0)
+
+    @property
+    def profile_global_tp(self) -> float | None:
+        return self._profile_get("gestion_trade", "global_tp", default=None)
+
+    @property
+    def profile_global_tp_win(self) -> bool:
+        return bool(self._profile_get("gestion_trade", "global_tp_win", default=False))
+
+    @property
+    def profile_btc_filter_active(self) -> bool:
+        return bool(
+            self._profile_get("macro_btc", "btc_filtro_cross", default=False)
+            or self._profile_get("macro_btc", "btc_filtro_price", default=False)
+        )
+
+    @property
+    def profile_btc_reverso(self) -> bool:
+        return bool(self._profile_get("macro_btc", "btc_reverso", default=False))
+
+    @property
+    def profile_kill_switch_enabled(self) -> bool:
+        return bool(self._profile_get("kill_switch_pf", "enabled", default=False))
 
     # ──────────────────────────────────────────────────────────────────────
     # Entry
@@ -213,4 +474,46 @@ class Config:
         d = copy.deepcopy(self._d)
         d.get("binance", {}).pop("api_key",    None)
         d.get("binance", {}).pop("api_secret", None)
+        d["strategy"] = self._effective_strategy_dict()
+        d["effective_filters_entrada"] = self._effective_filters_dict()
+        d["filtros_gestiona_trades"] = self.profile
+        d["filtros_gestiona_trades_meta"] = {
+            "loaded": self.profile_loaded,
+            "exists": self._profile.exists,
+            "path": str(self._profile.path),
+            "warnings": self.startup_warnings,
+            "unsupported_features": {
+                "global_tp": self.profile_global_tp is not None,
+                "global_tp_win": self.profile_global_tp_win,
+                "macro_btc": self.profile_btc_filter_active,
+                "btc_reverso": self.profile_btc_reverso,
+                "kill_switch_pf": self.profile_kill_switch_enabled,
+            },
+            "applied_overrides": {
+                "mode": self._profile_has("ejecucion", "mode") and self._profile_get("ejecucion", "mode") is not None,
+                "tp_pct": self._profile_has("gestion_trade", "tp_pct") and self._profile_get("gestion_trade", "tp_pct") is not None,
+                "sl_pct": self._profile_has("gestion_trade", "sl_pct") and self._profile_get("gestion_trade", "sl_pct") is not None,
+                "tp_pos": self._profile_has("gestion_trade", "tp_pos") and self._profile_get("gestion_trade", "tp_pos") is not None,
+                "sl_pos": self._profile_has("gestion_trade", "sl_pos") and self._profile_get("gestion_trade", "sl_pos") is not None,
+                "max_hold": self._profile_has("gestion_trade", "max_hold") and self._profile_get("gestion_trade", "max_hold") is not None,
+                "max_par": self._profile_has("limites", "max_par") and self._profile_get("limites", "max_par") is not None,
+                "max_global": self._profile_has("limites", "max_global") and self._profile_get("limites", "max_global") is not None,
+            },
+        }
         return d
+
+    @property
+    def profile(self) -> dict:
+        return self._profile.normalized
+
+    @property
+    def profile_loaded(self) -> bool:
+        return self._profile.loaded
+
+    @property
+    def profile_path(self) -> str:
+        return str(self._profile.path)
+
+    @property
+    def startup_warnings(self) -> List[str]:
+        return list(self._startup_warnings)

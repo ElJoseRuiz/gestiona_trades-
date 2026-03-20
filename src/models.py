@@ -63,13 +63,18 @@ class Signal:
     pair:         str
     top:          int
     close:        Optional[float]   # None si el CSV trae ""
-    mom_1h_pct:   Optional[float]   # None si el CSV trae ""
-    mom_pct:      float
-    vol_ratio:    float
-    trades_ratio: float
-    quintil:      int
-    categoria:    str      = ""     # columna #10 del nuevo formato
+    mom_1h_pct:   Optional[float]   # Compatibilidad con el motor/logs actuales
+    mom_pct:      Optional[float]
+    vol_ratio:    Optional[float]
+    trades_ratio: Optional[float]
+    quintil:      Optional[int]
+    bp:           Optional[float]   = None
+    categoria:    str               = ""
     signal_dt:    datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @property
+    def rank(self) -> int:
+        return self.top
 
 
 # ──────────────────────────────────────────────────────────────────────────────

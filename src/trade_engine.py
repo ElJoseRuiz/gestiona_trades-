@@ -65,6 +65,7 @@ class TradeEngine:
         self._timeout_task:   Optional[asyncio.Task] = None
         self._reconcile_task: Optional[asyncio.Task] = None
         self._open_tasks:     set = set()   # tareas _open_trade en curso
+        self._ignore_cycles:  Dict[str, dict] = {}
 
     # ──────────────────────────────────────────────────────────────────
     # Arranque / Parada
@@ -359,6 +360,7 @@ class TradeEngine:
                                or datetime.now(timezone.utc).isoformat())
             t.status = TradeStatus.OPEN
             t.touch()
+            self._reset_ignore_cycle(t.pair)
             await self._db.save_trade(t)
             await self._emit(EventType.ENTRY_FILL, t.trade_id, {
                 "orderId": t.entry_order_id,
@@ -414,6 +416,18 @@ class TradeEngine:
     # ──────────────────────────────────────────────────────────────────
 
     async def on_signal(self, sig: Signal):
+        if self._cfg.signal_filter_overlap and self.open_count_pair(sig.pair) > 0:
+            log.info(
+                f"Señal {sig.pair} descartada: filtro_overlap activo "
+                f"(hay operativa viva en el par)"
+            )
+            return
+
+        ignore_reason = self._register_ignore_cycle(sig)
+        if ignore_reason:
+            log.info(f"Señal {sig.pair} descartada: {ignore_reason}")
+            return
+
         # --- Control de Cuarentena ---
         if self._cfg.quarantine_hours > 0:
             last_closed = await self._db.get_last_closed_time(sig.pair)
@@ -449,8 +463,13 @@ class TradeEngine:
 
         await self._db.save_trade(trade)
         await self._emit(EventType.SIGNAL, trade.trade_id, {
-            "pair": sig.pair, "top": sig.top,
-            "mom_1h_pct": sig.mom_1h_pct, "close": sig.close,
+            "pair": sig.pair,
+            "top": sig.top,
+            "rank": sig.rank,
+            "mom_1h_pct": sig.mom_1h_pct,
+            "mom_pct": sig.mom_pct,
+            "bp": sig.bp,
+            "close": sig.close,
         })
         log.info(f"Trade {trade.trade_id[:8]} SIGNAL_RECEIVED {sig.pair}")
 
@@ -461,6 +480,48 @@ class TradeEngine:
         )
         self._open_tasks.add(task)
         task.add_done_callback(self._open_tasks.discard)
+
+    def _register_ignore_cycle(self, sig: Signal) -> Optional[str]:
+        ignore_n = self._cfg.signal_ignore_n
+        if ignore_n <= 0:
+            return None
+
+        if self.open_count_pair(sig.pair) > 0:
+            return None
+
+        state = self._ignore_cycles.get(sig.pair)
+        signal_dt = sig.signal_dt or datetime.now(timezone.utc)
+        ignore_h = self._cfg.signal_ignore_h
+
+        if state and ignore_h > 0:
+            window_started_at = state.get("window_started_at")
+            if isinstance(window_started_at, datetime):
+                elapsed_h = (signal_dt - window_started_at).total_seconds() / 3600.0
+                if elapsed_h >= ignore_h:
+                    self._ignore_cycles.pop(sig.pair, None)
+                    state = None
+
+        if state is None:
+            state = {
+                "ignored_count": 0,
+                "window_started_at": signal_dt,
+            }
+
+        if state["ignored_count"] < ignore_n:
+            state["ignored_count"] += 1
+            self._ignore_cycles[sig.pair] = state
+            return (
+                f"ignore_n activo ({state['ignored_count']}/{ignore_n})"
+                + (f" en ventana de {ignore_h}h" if ignore_h > 0 else "")
+            )
+
+        self._ignore_cycles[sig.pair] = state
+        return None
+
+    def _reset_ignore_cycle(self, pair: str):
+        if pair in self._ignore_cycles:
+            self._ignore_cycles.pop(pair, None)
+            log.debug(f"Ciclo ignore_n reseteado para {pair}")
 
     # ──────────────────────────────────────────────────────────────────
     # Apertura (chase loop)
@@ -684,6 +745,7 @@ class TradeEngine:
         trade.entry_fill_ts = fill_ts
         trade.status        = TradeStatus.OPEN
         trade.touch()
+        self._reset_ignore_cycle(trade.pair)
         await self._db.save_trade(trade)
         await self._emit(EventType.ENTRY_FILL, trade_id, {
             "orderId": order_id, "price": entry_price,
@@ -1296,11 +1358,13 @@ def _signal_to_dict(sig: Signal) -> dict:
         "fecha_hora":   sig.fecha_hora,
         "pair":         sig.pair,
         "top":          sig.top,
+        "rank":         sig.rank,
         "close":        sig.close,
         "mom_1h_pct":   sig.mom_1h_pct,
         "mom_pct":      sig.mom_pct,
         "vol_ratio":    sig.vol_ratio,
         "trades_ratio": sig.trades_ratio,
         "quintil":      sig.quintil,
+        "bp":           sig.bp,
         "categoria":    sig.categoria,
     }
