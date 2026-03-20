@@ -67,6 +67,7 @@ class App:
         self._dash:    DashboardServer = None  # type: ignore
         self._stop_event = asyncio.Event()
         self._configured_pairs: set[str] = set()
+        self._shutdown_started = False
 
     # ──────────────────────────────────────────────────────────────────
     # Arranque
@@ -76,108 +77,107 @@ class App:
         log.info("=" * 60)
         log.info(f"gestiona_trades arrancando — modo={self._cfg.mode}")
         log.info("=" * 60)
-
-        # 1. Base de datos
-        self._db = StateDB(self._cfg)
-        await self._db.init()
-
-        # 2. Binance REST — verificar credenciales y balance
-        self._om = OrderManager(self._cfg)
-        await self._om.init()
-
         try:
-            balance = await self._om.get_balance()
-            log.info(f"Balance USDT disponible: {balance:.2f}")
-        except BinanceError as e:
-            log.error(f"Error verificando credenciales Binance: {e}")
-            raise SystemExit(1)
+            # 1. Base de datos
+            self._db = StateDB(self._cfg)
+            await self._db.init()
 
-        # 3. Construir TradeEngine y WSManager (antes de reconciliar)
-        self._ws_mgr = WSManager(
-            cfg           = self._cfg,
-            order_mgr     = self._om,
-            on_entry_fill = self._on_entry_fill_proxy,
-            on_tp_fill    = self._on_tp_fill_proxy,
-            on_sl_fill    = self._on_sl_fill_proxy,
-        )
+            # 2. Binance REST — verificar credenciales y balance
+            self._om = OrderManager(self._cfg)
+            await self._om.init()
 
-        self._engine = TradeEngine(
-            cfg       = self._cfg,
-            order_mgr = self._om,
-            ws_mgr    = self._ws_mgr,
-            db        = self._db,
-            on_event  = self._on_event,
-        )
+            try:
+                balance = await self._om.get_balance()
+                log.info(f"Balance USDT disponible: {balance:.2f}")
+            except BinanceError as e:
+                log.error(f"Error verificando credenciales Binance: {e}")
+                raise SystemExit(1)
 
-        # 4. Cargar trades activos y reconciliar (Llama SIEMPRE para limpiar huérfanos en Binance)
-        active_trades = await self._db.load_active_trades()
-        log.info(f"Cargados {len(active_trades)} trades activos de la DB")
-        await self._engine.reconcile(active_trades)
+            # 3. Construir TradeEngine y WSManager (antes de reconciliar)
+            self._ws_mgr = WSManager(
+                cfg           = self._cfg,
+                order_mgr     = self._om,
+                on_entry_fill = self._on_entry_fill_proxy,
+                on_tp_fill    = self._on_tp_fill_proxy,
+                on_sl_fill    = self._on_sl_fill_proxy,
+            )
 
-        # 5. Configurar leverage + margin type SOLO para los pares que SIGUEN activos
-        current_active = self._engine.get_active_trades()
-        if current_active:
-            pairs_to_setup = {t.pair for t in current_active}
-            self._configured_pairs.update(pairs_to_setup)
+            self._engine = TradeEngine(
+                cfg       = self._cfg,
+                order_mgr = self._om,
+                ws_mgr    = self._ws_mgr,
+                db        = self._db,
+                on_event  = self._on_event,
+            )
 
-            # Ejecución concurrente en batches de 10 para no saturar el rate limit REST
-            async def _setup_batch(pairs_batch: list):
-                for p in pairs_batch:
-                    await self._setup_pair(p)
+            # 4. Cargar trades activos y reconciliar (Llama SIEMPRE para limpiar huérfanos en Binance)
+            active_trades = await self._db.load_active_trades()
+            log.info(f"Cargados {len(active_trades)} trades activos de la DB")
+            await self._engine.reconcile(active_trades)
 
-            pairs_list = list(pairs_to_setup)
-            tasks = [
-                _setup_batch(pairs_list[i:i + 10])
-                for i in range(0, len(pairs_list), 10)
-            ]
-            await asyncio.gather(*tasks)
+            # 5. Configurar leverage + margin type SOLO para los pares que SIGUEN activos
+            current_active = self._engine.get_active_trades()
+            if current_active:
+                pairs_to_setup = {t.pair for t in current_active}
+                self._configured_pairs.update(pairs_to_setup)
 
-        # 6. Iniciar WSManager
-        await self._ws_mgr.start()
+                # Ejecución concurrente en batches de 10 para no saturar el rate limit REST
+                async def _setup_batch(pairs_batch: list):
+                    for p in pairs_batch:
+                        await self._setup_pair(p)
 
-        # 7. Iniciar TradeEngine (timeout checker y reconciliador)
-        await self._engine.start()
+                pairs_list = list(pairs_to_setup)
+                tasks = [
+                    _setup_batch(pairs_list[i:i + 10])
+                    for i in range(0, len(pairs_list), 10)
+                ]
+                await asyncio.gather(*tasks)
 
-        # 8. Iniciar SignalWatcher
-        self._watcher = SignalWatcher(
-            cfg       = self._cfg,
-            on_signal = self._on_signal,
-        )
-        await self._watcher.start()
+            # 6. Iniciar WSManager
+            await self._ws_mgr.start()
 
-        # 9. Dashboard
-        self._dash = DashboardServer(
-            cfg               = self._cfg,
-            db                = self._db,
-            get_engine_status = self._engine_status,
-        )
-        if self._cfg.dashboard_enabled:
-            await self._dash.start()
+            # 7. Iniciar TradeEngine (timeout checker y reconciliador)
+            await self._engine.start()
 
-        # 10. Evento STARTUP
-        await self._on_event(Event(
-            event_type = EventType.STARTUP.value,
-            details    = {
-                "mode":             self._cfg.mode,
-                "max_open_trades":  self._cfg.max_open_trades,
-                "capital_per_trade": self._cfg.capital_per_trade,
-                "leverage":         self._cfg.leverage,
-                "tp_pct":           self._cfg.tp_pct,
-                "sl_pct":           self._cfg.sl_pct,
-            },
-        ))
+            # 8. Iniciar SignalWatcher
+            self._watcher = SignalWatcher(
+                cfg       = self._cfg,
+                on_signal = self._on_signal,
+            )
+            await self._watcher.start()
 
-        log.info("Sistema listo. Esperando señales...")
+            # 9. Dashboard
+            self._dash = DashboardServer(
+                cfg               = self._cfg,
+                db                = self._db,
+                get_engine_status = self._engine_status,
+            )
+            if self._cfg.dashboard_enabled:
+                await self._dash.start()
 
-        # 11. Bucle principal — esperar señal de parada
-        try:
+            # 10. Evento STARTUP
+            await self._on_event(Event(
+                event_type = EventType.STARTUP.value,
+                details    = {
+                    "mode":             self._cfg.mode,
+                    "max_open_trades":  self._cfg.max_open_trades,
+                    "capital_per_trade": self._cfg.capital_per_trade,
+                    "leverage":         self._cfg.leverage,
+                    "tp_pct":           self._cfg.tp_pct,
+                    "sl_pct":           self._cfg.sl_pct,
+                },
+            ))
+
+            log.info("Sistema listo. Esperando señales...")
+
+            # 11. Bucle principal — esperar señal de parada
             await self._stop_event.wait()
         except (KeyboardInterrupt, asyncio.CancelledError):
             # KeyboardInterrupt  → Windows sin signal handler registrado
             # CancelledError     → asyncio.run() cancela la tarea al recibir SIGINT
             log.info("Interrupción recibida, iniciando apagado...")
-
-        await self._shutdown()
+        finally:
+            await self._shutdown()
 
     # ──────────────────────────────────────────────────────────────────
     # Configuración de par: leverage + margin type
@@ -248,18 +248,21 @@ class App:
         if not self._engine:
             return {"open_trades": 0, "max_open_trades": self._cfg.max_open_trades}
 
-        metrics = await self._db.get_daily_metrics()
+        metrics = await self._db.get_daily_metrics() or {}
 
-        total_closed = metrics["total_closed"]
-        wins = metrics["wins"]
+        total_closed = int(metrics.get("total_closed", 0) or 0)
+        wins = int(metrics.get("wins", 0) or 0)
+        pnl_today = float(metrics.get("pnl_today", 0.0) or 0.0)
+        pnl_total = float(metrics.get("pnl_total", 0.0) or 0.0)
+        closed_today = int(metrics.get("closed_today", 0) or 0)
         win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
         return {
             "open_trades":      self._engine.open_count,
             "max_open_trades":  self._cfg.max_open_trades,
             "mode":             self._cfg.mode,
-            "pnl_today_usdt":   round(metrics["pnl_today"], 4),
-            "pnl_total_usdt":   round(metrics["pnl_total"], 4),
-            "trades_today":     metrics["closed_today"],
+            "pnl_today_usdt":   round(pnl_today, 4),
+            "pnl_total_usdt":   round(pnl_total, 4),
+            "trades_today":     closed_today,
             "win_rate_pct":     round(win_rate, 1),
             "ws_connected":     self._ws_mgr._connected if self._ws_mgr else False,
         }
@@ -272,6 +275,10 @@ class App:
         self._stop_event.set()
 
     async def _shutdown(self):
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
+
         log.info("Iniciando apagado graceful...")
 
         # Evento SHUTDOWN antes de cerrar la DB
