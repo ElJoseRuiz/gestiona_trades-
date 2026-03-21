@@ -100,7 +100,6 @@ strategy:
   tp_pct: 1.0               # Take profit %
   sl_pct: 2.0               # Stop loss %
   timeout_hours: 24         # Cierre forzado por tiempo
-  top_n: 3                  # Procesar sólo las N mejores señales
 
 signals:
   file_path: "fut_pares_short.csv"

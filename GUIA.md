@@ -192,7 +192,9 @@ strategy:
   sl_pct:              60        # stop loss en %
   trigger_offset_pct:  10        # trigger N% antes del precio objetivo
   timeout_hours:       24        # cerrar trade si supera N horas abierto
-  top_n:               1         # procesar solo los N primeros ranks
+  quarantine_hours:    4.0       # 0 = sin cuarentena tras el último cierre del par
+  solo_cerrando_trades: false    # true = no abre nuevos trades; solo monitoriza y cierra los existentes
+  paper_trading:       false     # true = nuevas señales en paper; el trading real pasa a solo cerrando
 ```
 
 **Valores válidos para `mode`:**
@@ -212,6 +214,20 @@ Ambas órdenes se colocan en Binance vía `/fapi/v1/algoOrder` y **sobreviven al
 
 > `trigger_offset_pct` está en la configuración por compatibilidad histórica
 > pero **no se aplica** en la implementación actual.
+
+> `solo_cerrando_trades: true` pone el bot en modo conservador:
+> no arranca la vigilancia de señales y, por tanto, no abre trades nuevos.
+> El sistema mantiene activos el WebSocket, la reconciliación, los TP/SL y los
+> cierres por `timeout_hours` para gestionar únicamente los trades ya abiertos.
+
+> `paper_trading: true` desvía las nuevas señales a una operativa paper
+> interna: no envía órdenes a Binance, abre al precio de mercado del momento,
+> evalúa TP/SL con el cierre de velas de 5 minutos y guarda los resultados en
+> una tabla SQLite separada (`paper_trades`). Mientras está activo, el trading
+> real pasa automáticamente a modo `solo_cerrando_trades`, y en paper
+> `max_open_trades` y `max_trades_per_pair` se consideran ilimitados. Si el
+> bot vuelve a arrancar con `paper_trading: false`, cualquier trade paper que
+> siga abierto se cierra al inicio de la sesión.
 
 #### `strategy` — filtros de señal
 
@@ -824,7 +840,6 @@ strategy:
 
 ```yaml
 strategy:
-  top_n:              1          # solo el rank 1
   min_momentum_pct:   5          # solo pares con caída >5% en 1h
   min_vol_ratio:      2.0        # volumen al menos 2x la media
   allowed_quintiles:  [1, 2]     # solo los dos quintiles más bajistas

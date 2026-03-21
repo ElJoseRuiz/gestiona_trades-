@@ -118,6 +118,10 @@ class Config:
         strategy["timeout_hours"] = self.timeout_hours
         strategy["max_hold"] = self.timeout_hours
         strategy["max_trades_per_pair"] = self.max_trades_per_pair
+        strategy["quarantine_hours"] = self.quarantine_hours
+        strategy["solo_cerrando_trades"] = self.real_trading_solo_cerrando
+        strategy["paper_trading"] = self.paper_trading
+        strategy["solo_cerrando_trades_config"] = self.solo_cerrando_trades
         return strategy
 
     def _effective_filters_dict(self) -> dict[str, Any]:
@@ -259,8 +263,6 @@ class Config:
     def timeout_hours(self) -> float:
         return float(self._effective_value(("gestion_trade", "max_hold"), ("strategy", "timeout_hours"), default=24))
     @property
-    def top_n(self)               -> int:        return int(self._get("strategy",   "top_n",             default=1))
-    @property
     def leverage(self)            -> int:        return int(self._get("strategy",   "leverage",          default=1))
     @property
     def min_momentum_pct(self)    -> float:      return float(self._get("strategy", "min_momentum_pct",  default=0))
@@ -275,6 +277,15 @@ class Config:
         return int(self._effective_value(("limites", "max_par"), ("strategy", "max_trades_per_pair"), default=1))
     @property
     def quarantine_hours(self) -> float:         return float(self._get("strategy", "quarantine_hours",   default=4.0))
+    @property
+    def solo_cerrando_trades(self) -> bool:
+        return self._as_bool(self._get("strategy", "solo_cerrando_trades", default=False), default=False)
+    @property
+    def paper_trading(self) -> bool:
+        return self._as_bool(self._get("strategy", "paper_trading", default=False), default=False)
+    @property
+    def real_trading_solo_cerrando(self) -> bool:
+        return self.solo_cerrando_trades or self.paper_trading
 
     # ──────────────────────────────────────────────────────────────────────
     # Signals

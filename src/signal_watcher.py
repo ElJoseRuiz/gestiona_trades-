@@ -8,7 +8,7 @@ Manejo del CSV:
   - Alias tolerantes de columnas para acompanar la integracion con el dashboard
 
 Logica:
-  - Procesa solo filas con leido=="no" y rank/top <= top_n
+  - Procesa solo filas con leido=="no"
   - Senales con antiguedad > max_signal_age_minutes -> marca "timeout"
   - Senales validas -> aplica filtros de la config -> emite al trade engine
   - Marca "si" (procesada) o "timeout" incluso si se descarta por filtros
@@ -142,10 +142,6 @@ class SignalWatcher:
                 top = int(float(rank_raw))
             except ValueError:
                 log.warning(f"Senal {par} descartada: rank/top invalido '{rank_raw}'")
-                updates[key] = "si"
-                continue
-
-            if top > self._cfg.top_n:
                 updates[key] = "si"
                 continue
 

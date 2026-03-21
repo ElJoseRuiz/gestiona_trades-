@@ -1,6 +1,6 @@
 """
-state.py — Persistencia SQLite asíncrona (aiosqlite).
-Tabla trades + tabla events. Recuperación tras reinicio.
+state.py - Persistencia SQLite asincrona (aiosqlite).
+Tabla trades + tabla paper_trades + tabla events. Recuperacion tras reinicio.
 """
 from __future__ import annotations
 
@@ -13,20 +13,17 @@ import aiosqlite
 
 from .config import Config
 from .logger import get_logger
-from .models import Event, EventType, Trade, TradeStatus
+from .models import Event, Trade, TradeStatus
 
 log = get_logger("state")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Schema SQL
-# ──────────────────────────────────────────────────────────────────────────────
 
-_CREATE_TRADES = """
-CREATE TABLE IF NOT EXISTS trades (
+_CREATE_TRADE_TABLE_TEMPLATE = """
+CREATE TABLE IF NOT EXISTS {table_name} (
     trade_id            TEXT PRIMARY KEY,
     pair                TEXT NOT NULL,
     signal_ts           TEXT,
-    signal_data         TEXT,           -- JSON
+    signal_data         TEXT,
     entry_order_id      INTEGER,
     entry_price         REAL,
     entry_quantity      REAL,
@@ -52,20 +49,19 @@ CREATE TABLE IF NOT EXISTS trades (
 )
 """
 
+_CREATE_TRADES = _CREATE_TRADE_TABLE_TEMPLATE.format(table_name="trades")
+_CREATE_PAPER_TRADES = _CREATE_TRADE_TABLE_TEMPLATE.format(table_name="paper_trades")
+
 _CREATE_EVENTS = """
 CREATE TABLE IF NOT EXISTS events (
     event_id    INTEGER PRIMARY KEY AUTOINCREMENT,
     trade_id    TEXT,
     event_type  TEXT NOT NULL,
-    details     TEXT,                   -- JSON
+    details     TEXT,
     timestamp   TEXT NOT NULL
 )
 """
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# StateDB
-# ──────────────────────────────────────────────────────────────────────────────
 
 class StateDB:
     def __init__(self, cfg: Config):
@@ -78,6 +74,7 @@ class StateDB:
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute(_CREATE_TRADES)
+        await self._db.execute(_CREATE_PAPER_TRADES)
         await self._db.execute(_CREATE_EVENTS)
         await self._db.commit()
         log.info(f"DB inicializada: {self._path}")
@@ -87,17 +84,19 @@ class StateDB:
             await self._db.close()
             self._db = None
 
-    # ──────────────────────────────────────────────────────────────────
-    # Trades
-    # ──────────────────────────────────────────────────────────────────
-
     async def save_trade(self, trade: Trade):
-        sql = """
-            INSERT OR REPLACE INTO trades (
+        await self._save_trade_to_table("trades", trade)
+
+    async def save_paper_trade(self, trade: Trade):
+        await self._save_trade_to_table("paper_trades", trade)
+
+    async def _save_trade_to_table(self, table: str, trade: Trade):
+        sql = f"""
+            INSERT OR REPLACE INTO {table} (
                 trade_id, pair, status, signal_ts,
                 entry_order_id, entry_quantity, entry_price, entry_fill_ts,
                 tp_order_id, tp_trigger_price, tp_price,
-                sl_order_id, sl_trigger_price,
+                sl_order_id, sl_trigger_price, sl_price,
                 exit_price, exit_fill_ts, exit_type,
                 pnl_pct, pnl_usdt, fees_usdt,
                 error_message, signal_data,
@@ -106,7 +105,7 @@ class StateDB:
                 ?, ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?,
-                ?, ?,
+                ?, ?, ?,
                 ?, ?, ?,
                 ?, ?, ?,
                 ?, ?,
@@ -114,21 +113,42 @@ class StateDB:
             )
         """
         await self._db.execute(sql, (
-            trade.trade_id, trade.pair, trade.status.value, trade.signal_ts,
-            trade.entry_order_id, trade.entry_quantity, trade.entry_price, trade.entry_fill_ts,
-            trade.tp_order_id, trade.tp_trigger_price, trade.tp_price,
-            trade.sl_order_id, trade.sl_trigger_price,
-            trade.exit_price, trade.exit_fill_ts, trade.exit_type,
-            trade.pnl_pct, trade.pnl_usdt, trade.fees_usdt,
-            trade.error_message, json.dumps(trade.signal_data),
-            trade.created_at, trade.updated_at,
+            trade.trade_id,
+            trade.pair,
+            trade.status.value,
+            trade.signal_ts,
+            trade.entry_order_id,
+            trade.entry_quantity,
+            trade.entry_price,
+            trade.entry_fill_ts,
+            trade.tp_order_id,
+            trade.tp_trigger_price,
+            trade.tp_price,
+            trade.sl_order_id,
+            trade.sl_trigger_price,
+            trade.sl_price,
+            trade.exit_price,
+            trade.exit_fill_ts,
+            trade.exit_type,
+            trade.pnl_pct,
+            trade.pnl_usdt,
+            trade.fees_usdt,
+            trade.error_message,
+            json.dumps(trade.signal_data),
+            trade.created_at,
+            trade.updated_at,
             1 if trade.timeout_triggered else 0,
-            1 if getattr(trade, 'reconciled', False) else 0
+            1 if getattr(trade, "reconciled", False) else 0,
         ))
         await self._db.commit()
 
     async def load_active_trades(self) -> List[Trade]:
-        """Recupera trades que no están en estado terminal (para reconciliación)."""
+        return await self._load_active_from_table("trades", source="real")
+
+    async def load_active_paper_trades(self) -> List[Trade]:
+        return await self._load_active_from_table("paper_trades", source="paper")
+
+    async def _load_active_from_table(self, table: str, source: str) -> List[Trade]:
         terminal = (
             TradeStatus.CLOSED.value,
             TradeStatus.NOT_EXECUTED.value,
@@ -136,46 +156,90 @@ class StateDB:
         )
         placeholders = ",".join("?" * len(terminal))
         async with self._db.execute(
-            f"SELECT * FROM trades WHERE status NOT IN ({placeholders})",
+            f"SELECT * FROM {table} WHERE status NOT IN ({placeholders})",
             terminal,
         ) as cur:
             rows = await cur.fetchall()
-        return [_row_to_trade(r) for r in rows]
+        return [_row_to_trade(r, source=source) for r in rows]
 
     async def load_recent_closed(self, limit: int = 50) -> List[Trade]:
         async with self._db.execute(
             "SELECT * FROM trades WHERE status IN (?,?,?) "
             "ORDER BY updated_at DESC LIMIT ?",
-            (TradeStatus.CLOSED.value, TradeStatus.NOT_EXECUTED.value,
-             TradeStatus.ERROR.value, limit),
+            (
+                TradeStatus.CLOSED.value,
+                TradeStatus.NOT_EXECUTED.value,
+                TradeStatus.ERROR.value,
+                limit,
+            ),
         ) as cur:
             rows = await cur.fetchall()
-        return [_row_to_trade(r) for r in rows]
+        return [_row_to_trade(r, source="real") for r in rows]
 
     async def load_all_trades(self, limit: int = 200) -> List[Trade]:
+        active_real = await self._load_active_from_table("trades", source="real")
+        active_paper = await self._load_active_from_table("paper_trades", source="paper")
+        active_trades = active_real + active_paper
+        active_ids = {t.trade_id for t in active_trades}
+
+        target_total = max(limit, len(active_trades))
+        closed_budget = max(target_total - len(active_trades), 0)
+
+        recent_real = await self._load_trades_from_table("trades", limit=target_total, source="real")
+        recent_paper = await self._load_trades_from_table("paper_trades", limit=target_total, source="paper")
+        closed_candidates = [
+            t for t in (recent_real + recent_paper)
+            if t.trade_id not in active_ids
+        ]
+        closed_candidates.sort(key=lambda t: (t.updated_at or t.created_at or ""), reverse=True)
+        selected_closed = closed_candidates[:closed_budget]
+
+        merged = active_trades + selected_closed
+        merged.sort(key=lambda t: (t.updated_at or t.created_at or ""), reverse=True)
+        return merged
+
+    async def _load_trades_from_table(self,
+                                      table: str,
+                                      limit: int,
+                                      source: str) -> List[Trade]:
         async with self._db.execute(
-            "SELECT * FROM trades ORDER BY created_at DESC LIMIT ?", (limit,)
+            f"SELECT * FROM {table} ORDER BY created_at DESC LIMIT ?",
+            (limit,),
         ) as cur:
             rows = await cur.fetchall()
-        return [_row_to_trade(r) for r in rows]
+        return [_row_to_trade(r, source=source) for r in rows]
 
     async def get_closed_trades(self) -> list[Trade]:
-        """Extrae el histórico completo de operaciones cerradas ordenado por fecha de salida."""
         sql = "SELECT * FROM trades WHERE status = 'closed' ORDER BY exit_fill_ts ASC"
         async with self._db.execute(sql) as cursor:
             rows = await cursor.fetchall()
-        return [_row_to_trade(r) for r in rows]
+        return [_row_to_trade(r, source="real") for r in rows]
 
     async def get_all_history_trades(self) -> list[Trade]:
-        """Extrae el histórico absoluto (abiertos y cerrados) para el cálculo de concurrencia."""
-        sql = "SELECT * FROM trades ORDER BY created_at ASC"
+        real_rows = await self._load_history_from_table("trades", source="real")
+        paper_rows = await self._load_history_from_table("paper_trades", source="paper")
+        merged = real_rows + paper_rows
+        merged.sort(key=lambda t: t.created_at or "")
+        return merged
+
+    async def _load_history_from_table(self, table: str, source: str) -> list[Trade]:
+        sql = f"SELECT * FROM {table} ORDER BY created_at ASC"
         async with self._db.execute(sql) as cursor:
             rows = await cursor.fetchall()
-        return [_row_to_trade(r) for r in rows]
+        return [_row_to_trade(r, source=source) for r in rows]
 
     async def get_last_closed_time(self, pair: str) -> datetime | None:
-        """Devuelve el datetime del último cierre registrado para un par específico."""
-        sql = "SELECT exit_fill_ts FROM trades WHERE pair = ? AND status = 'closed' AND exit_fill_ts IS NOT NULL ORDER BY exit_fill_ts DESC LIMIT 1"
+        return await self._get_last_closed_time_from_table("trades", pair)
+
+    async def get_last_paper_closed_time(self, pair: str) -> datetime | None:
+        return await self._get_last_closed_time_from_table("paper_trades", pair)
+
+    async def _get_last_closed_time_from_table(self, table: str, pair: str) -> datetime | None:
+        sql = (
+            f"SELECT exit_fill_ts FROM {table} "
+            "WHERE pair = ? AND status = 'closed' AND exit_fill_ts IS NOT NULL "
+            "ORDER BY exit_fill_ts DESC LIMIT 1"
+        )
         async with self._db.execute(sql, (pair,)) as cursor:
             row = await cursor.fetchone()
 
@@ -189,14 +253,19 @@ class StateDB:
 
     async def get_trade(self, trade_id: str) -> Optional[Trade]:
         async with self._db.execute(
-            "SELECT * FROM trades WHERE trade_id=?", (trade_id,)
+            "SELECT * FROM trades WHERE trade_id=?",
+            (trade_id,),
         ) as cur:
             row = await cur.fetchone()
-        return _row_to_trade(row) if row else None
+        if row:
+            return _row_to_trade(row, source="real")
 
-    # ──────────────────────────────────────────────────────────────────
-    # Events
-    # ──────────────────────────────────────────────────────────────────
+        async with self._db.execute(
+            "SELECT * FROM paper_trades WHERE trade_id=?",
+            (trade_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_trade(row, source="paper") if row else None
 
     async def save_event(self, ev: Event):
         await self._db.execute(
@@ -216,88 +285,98 @@ class StateDB:
 
     async def get_recent_events(self, limit: int = 100) -> List[Event]:
         async with self._db.execute(
-            "SELECT * FROM events ORDER BY event_id DESC LIMIT ?", (limit,)
+            "SELECT * FROM events ORDER BY event_id DESC LIMIT ?",
+            (limit,),
         ) as cur:
             rows = await cur.fetchall()
-        return [_row_to_event(r) for r in reversed(await cur.fetchall())]
+        return [_row_to_event(r) for r in reversed(rows)]
 
     async def get_last_events(self, limit: int = 100) -> List[Event]:
         async with self._db.execute(
-            "SELECT * FROM events ORDER BY event_id DESC LIMIT ?", (limit,)
+            "SELECT * FROM events ORDER BY event_id DESC LIMIT ?",
+            (limit,),
         ) as cur:
             rows = await cur.fetchall()
         return [_row_to_event(r) for r in rows]
 
     async def get_daily_metrics(self) -> dict:
-        """Calcula PnL y wins del día y totales directamente desde SQLite."""
+        return await self._get_daily_metrics_from_table("trades")
+
+    async def get_paper_daily_metrics(self) -> dict:
+        return await self._get_daily_metrics_from_table("paper_trades")
+
+    async def _get_daily_metrics_from_table(self, table: str) -> dict:
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        sql = """
+        sql = f"""
             SELECT
                 COUNT(*) as total_closed,
                 SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END) as wins,
                 SUM(pnl_usdt) as pnl_total,
                 SUM(CASE WHEN exit_fill_ts LIKE ? THEN pnl_usdt ELSE 0 END) as pnl_today,
                 SUM(CASE WHEN exit_fill_ts LIKE ? THEN 1 ELSE 0 END) as closed_today
-            FROM trades
+            FROM {table}
             WHERE status = 'closed'
         """
         async with self._db.execute(sql, (f"{today_str}%", f"{today_str}%")) as cursor:
             row = await cursor.fetchone()
 
         if not row:
-            return {"total_closed": 0, "wins": 0, "pnl_total": 0.0, "pnl_today": 0.0, "closed_today": 0}
+            return {
+                "total_closed": 0,
+                "wins": 0,
+                "pnl_total": 0.0,
+                "pnl_today": 0.0,
+                "closed_today": 0,
+            }
 
         return {
             "total_closed": row[0] or 0,
-            "wins":         row[1] or 0,
-            "pnl_total":    row[2] or 0.0,
-            "pnl_today":    row[3] or 0.0,
-            "closed_today": row[4] or 0
+            "wins": row[1] or 0,
+            "pnl_total": row[2] or 0.0,
+            "pnl_today": row[3] or 0.0,
+            "closed_today": row[4] or 0,
         }
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers de conversión
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _row_to_trade(row) -> Trade:
+def _row_to_trade(row, source: str = "real") -> Trade:
     r = dict(row)
     return Trade(
-        trade_id         = r["trade_id"],
-        pair             = r["pair"],
-        signal_ts        = r["signal_ts"] or "",
-        signal_data      = json.loads(r["signal_data"] or "{}"),
-        entry_order_id   = r["entry_order_id"],
-        entry_price      = r["entry_price"],
-        entry_quantity   = r["entry_quantity"],
-        entry_fill_ts    = r["entry_fill_ts"],
-        tp_order_id      = r["tp_order_id"],
-        sl_order_id      = r["sl_order_id"],
-        tp_price         = r["tp_price"],
-        sl_price         = r["sl_price"],
-        tp_trigger_price = r["tp_trigger_price"],
-        sl_trigger_price = r["sl_trigger_price"],
-        exit_price       = r["exit_price"],
-        exit_fill_ts     = r["exit_fill_ts"],
-        exit_type        = r["exit_type"],
-        pnl_usdt         = r["pnl_usdt"],
-        pnl_pct          = r["pnl_pct"],
-        fees_usdt        = r["fees_usdt"],
-        status             = TradeStatus(r["status"]),
-        error_message      = r["error_message"],
-        created_at         = r["created_at"],
-        updated_at         = r["updated_at"],
-        timeout_triggered  = bool(r["timeout_triggered"]) if r["timeout_triggered"] is not None else False,
-        reconciled         = bool(r["reconciled"]) if r["reconciled"] is not None else False,
+        trade_id=r["trade_id"],
+        pair=r["pair"],
+        signal_ts=r["signal_ts"] or "",
+        signal_data=json.loads(r["signal_data"] or "{}"),
+        entry_order_id=r["entry_order_id"],
+        entry_price=r["entry_price"],
+        entry_quantity=r["entry_quantity"],
+        entry_fill_ts=r["entry_fill_ts"],
+        tp_order_id=r["tp_order_id"],
+        sl_order_id=r["sl_order_id"],
+        tp_price=r["tp_price"],
+        sl_price=r["sl_price"],
+        tp_trigger_price=r["tp_trigger_price"],
+        sl_trigger_price=r["sl_trigger_price"],
+        exit_price=r["exit_price"],
+        exit_fill_ts=r["exit_fill_ts"],
+        exit_type=r["exit_type"],
+        pnl_usdt=r["pnl_usdt"],
+        pnl_pct=r["pnl_pct"],
+        fees_usdt=r["fees_usdt"],
+        status=TradeStatus(r["status"]),
+        error_message=r["error_message"],
+        created_at=r["created_at"],
+        updated_at=r["updated_at"],
+        timeout_triggered=bool(r["timeout_triggered"]) if r["timeout_triggered"] is not None else False,
+        reconciled=bool(r["reconciled"]) if r["reconciled"] is not None else False,
+        source=source,
     )
 
 
 def _row_to_event(row) -> Event:
     r = dict(row)
     return Event(
-        event_id   = r["event_id"],
-        trade_id   = r["trade_id"],
-        event_type = r["event_type"],
-        details    = json.loads(r["details"] or "{}"),
-        timestamp  = r["timestamp"],
+        event_id=r["event_id"],
+        trade_id=r["trade_id"],
+        event_type=r["event_type"],
+        details=json.loads(r["details"] or "{}"),
+        timestamp=r["timestamp"],
     )

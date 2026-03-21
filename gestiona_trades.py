@@ -45,6 +45,7 @@ from src.dashboard     import DashboardServer
 from src.logger        import get_logger, setup_logging
 from src.models        import Event, EventType
 from src.order_manager import BinanceError, OrderManager
+from src.paper_trade_engine import PaperTradeEngine
 from src.signal_watcher import SignalWatcher
 from src.state         import StateDB
 from src.trade_engine  import TradeEngine
@@ -63,6 +64,7 @@ class App:
         self._om:      OrderManager   = None  # type: ignore
         self._ws_mgr:  WSManager      = None  # type: ignore
         self._engine:  TradeEngine    = None  # type: ignore
+        self._paper_engine: PaperTradeEngine = None  # type: ignore
         self._watcher: SignalWatcher  = None  # type: ignore
         self._dash:    DashboardServer = None  # type: ignore
         self._stop_event = asyncio.Event()
@@ -75,6 +77,16 @@ class App:
 
     async def run(self):
         log.info("=" * 60)
+        if self._cfg.real_trading_solo_cerrando:
+            log.warning(
+                "Trading real en modo solo_cerrando_trades=ON: no se abriran "
+                "nuevos trades reales; solo se monitorizaran y cerraran los ya existentes."
+            )
+        if self._cfg.paper_trading:
+            log.warning(
+                "Modo paper_trading=ON: las nuevas señales se ejecutaran en paper "
+                "sin enviar ordenes a Binance."
+            )
         log.info(f"gestiona_trades arrancando — modo={self._cfg.mode}")
         log.info("=" * 60)
         try:
@@ -109,11 +121,29 @@ class App:
                 db        = self._db,
                 on_event  = self._on_event,
             )
+            self._paper_engine = PaperTradeEngine(
+                cfg       = self._cfg,
+                order_mgr = self._om,
+                db        = self._db,
+                on_event  = self._on_event,
+            )
 
             # 4. Cargar trades activos y reconciliar (Llama SIEMPRE para limpiar huérfanos en Binance)
             active_trades = await self._db.load_active_trades()
             log.info(f"Cargados {len(active_trades)} trades activos de la DB")
             await self._engine.reconcile(active_trades)
+
+            active_paper_trades = await self._db.load_active_paper_trades()
+            if self._cfg.paper_trading:
+                log.info(f"Cargados {len(active_paper_trades)} trades paper activos de la DB")
+                await self._paper_engine.restore(active_paper_trades)
+            elif active_paper_trades:
+                log.warning(
+                    f"paper_trading=OFF al arrancar: cerrando {len(active_paper_trades)} "
+                    "trades paper que seguian abiertos."
+                )
+                await self._paper_engine.restore(active_paper_trades)
+                await self._paper_engine.close_all_for_session_end()
 
             # 5. Configurar leverage + margin type SOLO para los pares que SIGUEN activos
             current_active = self._engine.get_active_trades()
@@ -139,12 +169,21 @@ class App:
             # 7. Iniciar TradeEngine (timeout checker y reconciliador)
             await self._engine.start()
 
-            # 8. Iniciar SignalWatcher
-            self._watcher = SignalWatcher(
-                cfg       = self._cfg,
-                on_signal = self._on_signal,
-            )
-            await self._watcher.start()
+            if self._cfg.paper_trading:
+                await self._paper_engine.start()
+
+            # 8. Iniciar SignalWatcher solo si se permiten nuevas entradas
+            if self._cfg.paper_trading or not self._cfg.real_trading_solo_cerrando:
+                self._watcher = SignalWatcher(
+                    cfg       = self._cfg,
+                    on_signal = self._on_signal,
+                )
+                await self._watcher.start()
+            elif self._cfg.real_trading_solo_cerrando:
+                log.info(
+                    "SignalWatcher no iniciado porque no se permiten nuevas entradas "
+                    "(trading real en solo_cerrando y paper desactivado)."
+                )
 
             # 9. Dashboard
             self._dash = DashboardServer(
@@ -165,10 +204,17 @@ class App:
                     "leverage":         self._cfg.leverage,
                     "tp_pct":           self._cfg.tp_pct,
                     "sl_pct":           self._cfg.sl_pct,
+                    "solo_cerrando_trades": self._cfg.real_trading_solo_cerrando,
+                    "paper_trading": self._cfg.paper_trading,
                 },
             ))
 
-            log.info("Sistema listo. Esperando señales...")
+            if self._cfg.paper_trading:
+                log.info("Sistema listo. Trading real en solo cerrando y nuevas señales en paper.")
+            elif self._cfg.real_trading_solo_cerrando:
+                log.info("Sistema listo. Monitorizando cierres de trades reales existentes...")
+            else:
+                log.info("Sistema listo. Esperando señales...")
 
             # 11. Bucle principal — esperar señal de parada
             await self._stop_event.wait()
@@ -218,6 +264,16 @@ class App:
     # ──────────────────────────────────────────────────────────────────
 
     async def _on_signal(self, signal):
+        if self._cfg.paper_trading:
+            await self._paper_engine.on_signal(signal)
+            return
+
+        if self._cfg.real_trading_solo_cerrando:
+            log.info(
+                f"Senal ignorada para {signal.pair}: trading real en solo_cerrando_trades=ON"
+            )
+            return
+
         # Configurar leverage/margin solo la primera vez que vemos el par (caché en memoria)
         if signal.pair not in self._configured_pairs:
             await self._setup_pair(signal.pair)
@@ -244,11 +300,66 @@ class App:
     # engine_status para el dashboard
     # ──────────────────────────────────────────────────────────────────
 
+    async def _get_orphan_positions(self) -> list[dict]:
+        """
+        Posiciones reales abiertas en Binance sin trade activo correspondiente.
+        Solo se exponen al dashboard para visibilidad; no se inventan trades.
+        """
+        if not self._engine or not self._om:
+            return []
+
+        active_pairs = {
+            trade.pair
+            for trade in self._engine.get_active_trades()
+            if getattr(trade, "pair", None)
+        }
+
+        try:
+            all_positions = await self._om.get_all_positions()
+        except Exception as e:
+            log.warning(f"No se pudieron obtener posiciones Binance para dashboard: {e}")
+            return []
+
+        detected_at = datetime.now(timezone.utc).isoformat()
+        orphan_positions: list[dict] = []
+
+        for position in all_positions:
+            pair = position.get("symbol")
+            if not pair or pair in active_pairs:
+                continue
+
+            position_amt = float(position.get("positionAmt", 0) or 0)
+            if position_amt == 0:
+                continue
+
+            orphan_positions.append({
+                "pair": pair,
+                "side": "SHORT" if position_amt < 0 else "LONG",
+                "position_amt": position_amt,
+                "entry_price": float(position.get("entryPrice", 0) or 0),
+                "mark_price": float(position.get("markPrice", 0) or 0),
+                "unrealized_pnl": float(position.get("unRealizedProfit", 0) or 0),
+                "notional": abs(float(position.get("notional", 0) or 0)),
+                "isolated_wallet": float(position.get("isolatedWallet", 0) or 0),
+                "detected_at": detected_at,
+            })
+
+        return orphan_positions
+
     async def _engine_status(self) -> dict:
         if not self._engine:
             return {"open_trades": 0, "max_open_trades": self._cfg.max_open_trades}
 
         metrics = await self._db.get_daily_metrics() or {}
+        paper_metrics = await self._db.get_paper_daily_metrics() or {}
+        orphan_positions = await self._get_orphan_positions()
+        balance_usdt = None
+
+        if self._om:
+            try:
+                balance_usdt = await self._om.get_balance()
+            except Exception as e:
+                log.warning(f"No se pudo obtener balance para dashboard: {e}")
 
         total_closed = int(metrics.get("total_closed", 0) or 0)
         wins = int(metrics.get("wins", 0) or 0)
@@ -256,15 +367,32 @@ class App:
         pnl_total = float(metrics.get("pnl_total", 0.0) or 0.0)
         closed_today = int(metrics.get("closed_today", 0) or 0)
         win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
+        paper_total_closed = int(paper_metrics.get("total_closed", 0) or 0)
+        paper_wins = int(paper_metrics.get("wins", 0) or 0)
+        paper_win_rate = (paper_wins / paper_total_closed * 100) if paper_total_closed > 0 else 0
+        paper_open = self._paper_engine.open_count if self._paper_engine else 0
+        real_open = self._engine.open_count
         return {
-            "open_trades":      self._engine.open_count,
+            "open_trades":      real_open + paper_open,
+            "open_trades_real": real_open,
+            "open_trades_paper": paper_open,
             "max_open_trades":  self._cfg.max_open_trades,
             "mode":             self._cfg.mode,
             "pnl_today_usdt":   round(pnl_today, 4),
             "pnl_total_usdt":   round(pnl_total, 4),
             "trades_today":     closed_today,
             "win_rate_pct":     round(win_rate, 1),
+            "paper_pnl_today_usdt": round(float(paper_metrics.get("pnl_today", 0.0) or 0.0), 4),
+            "paper_pnl_total_usdt": round(float(paper_metrics.get("pnl_total", 0.0) or 0.0), 4),
+            "paper_trades_today": int(paper_metrics.get("closed_today", 0) or 0),
+            "paper_win_rate_pct": round(paper_win_rate, 1),
+            "balance_usdt":     round(balance_usdt, 4) if balance_usdt is not None else None,
+            "orphan_positions": orphan_positions,
+            "orphan_count":     len(orphan_positions),
+            "paper_trading":    self._cfg.paper_trading,
+            "real_solo_cerrando_trades": self._cfg.real_trading_solo_cerrando,
             "ws_connected":     self._ws_mgr._connected if self._ws_mgr else False,
+            "ws_binance_connected": self._ws_mgr._connected if self._ws_mgr else False,
         }
 
     # ──────────────────────────────────────────────────────────────────
@@ -285,7 +413,10 @@ class App:
         if self._db:
             ev = Event(
                 event_type = EventType.SHUTDOWN.value,
-                details    = {"open_trades": self._engine.open_count if self._engine else 0},
+                details    = {
+                    "open_trades_real": self._engine.open_count if self._engine else 0,
+                    "open_trades_paper": self._paper_engine.open_count if self._paper_engine else 0,
+                },
             )
             try:
                 await self._db.save_event(ev)
@@ -306,6 +437,12 @@ class App:
                 await asyncio.wait_for(self._engine.stop(), timeout=5.0)
             except asyncio.TimeoutError:
                 log.warning("TradeEngine.stop() excedió 5s de timeout, continuando apagado.")
+
+        if self._paper_engine:
+            try:
+                await asyncio.wait_for(self._paper_engine.stop(), timeout=5.0)
+            except asyncio.TimeoutError:
+                log.warning("PaperTradeEngine.stop() excedió 5s de timeout, continuando apagado.")
 
         # 4. WSManager
         if self._ws_mgr:
