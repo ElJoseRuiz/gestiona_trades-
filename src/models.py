@@ -116,6 +116,7 @@ class Trade:
     updated_at:        str            = field(default_factory=_now_iso)
     timeout_triggered: bool           = False
     reconciled:        bool           = False
+    source:            str            = "real"
 
     def touch(self):
         self.updated_at = _now_iso()

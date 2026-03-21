@@ -17,6 +17,8 @@
 
   /* ── Status bar ── */
   .status-bar{display:flex;gap:8px;flex-wrap:wrap}
+  .status-bar.paper-row{display:none}
+  .status-bar.paper-row.active{display:flex}
   .stat-chip{background:#1a1d2e;border:1px solid #2d3150;border-radius:6px;
     padding:6px 12px;display:flex;flex-direction:column;gap:2px;min-width:110px}
   .stat-chip .label{font-size:10px;color:#6b7294;text-transform:uppercase;letter-spacing:.5px}
@@ -39,6 +41,10 @@
     color:#8b8fa8;text-transform:uppercase;letter-spacing:.8px;
     border-bottom:1px solid #232740;display:flex;justify-content:space-between}
   .section-body{overflow-x:auto}
+  .warning-banner{display:none;background:linear-gradient(90deg,#3a2210 0%,#4a2b13 100%);
+    border:1px solid #f4a26155;border-radius:8px;padding:10px 14px;color:#ffd8b0}
+  .warning-banner.active{display:block}
+  .warning-banner strong{color:#f4a261;letter-spacing:.5px}
 
   /* ── Tablas ── */
   table{width:100%;border-collapse:collapse}
@@ -58,6 +64,7 @@
   .badge.closing{background:#2a1f1a;color:#f4a261;border:1px solid #f4a26160}
   .badge.error{background:#2a0a0a;color:#ff6b6b;border:1px solid #ff6b6b60}
   .badge.signal_received{background:#1a2a3a;color:#64b5f6;border:1px solid #64b5f660}
+  .badge.orphan_binance{background:#2a1220;color:#ff9ecb;border:1px solid #ff9ecb60}
 
   /* ── Colores PnL ── */
   .pos{color:#2dc653}
@@ -121,6 +128,8 @@
     </div>
     <div class="stat-chip cfg-chip"><span class="label">Perfil YAML</span><span class="value" id="cfg-profile" style="font-size:13px">—</span></div>
     <div class="stat-chip cfg-chip"><span class="label">Filtros Entrada</span><span class="value" id="cfg-filters" style="font-size:13px">—</span></div>
+    <div class="stat-chip"><span class="label">Balance USDT</span><span class="value" id="s-balance">—</span></div>
+    <div class="stat-chip"><span class="label">Huérfanas Binance</span><span class="value" id="s-orphans">—</span></div>
   </div>
   <div style="font-size:11px;color:#4a4e6a" id="last-update">—</div>
 </div>
@@ -128,9 +137,16 @@
 <!-- ── Main ── -->
 <div class="main">
 
+  <div id="solo-cerrando-banner" class="warning-banner">
+    <strong>SOLO CERRANDO TRADES REALES</strong> · No se abrirán nuevas posiciones reales. El bot solo monitoriza y gestiona cierres de trades reales ya abiertos. <span id="solo-cerrando-timeout" class="muted"></span>
+  </div>
+
+  <div id="paper-trading-banner" class="warning-banner">
+    <strong>PAPER TRADING ACTIVO</strong> · Las nuevas señales se ejecutan en paper y no envían órdenes a Binance. El trading real queda en modo solo cerrando. <span id="paper-trading-extra" class="muted"></span>
+  </div>
+
   <!-- Status chips -->
   <div class="status-bar" id="status-bar">
-    <div class="stat-chip"><span class="label">Balance USDT</span><span class="value" id="s-balance">—</span></div>
     <div class="stat-chip"><span class="label">Trades abiertos</span><span class="value" id="s-open">—</span></div>
     <div class="stat-chip"><span class="label">PnL del día</span><span class="value" id="s-pnl-day">—</span></div>
     <div class="stat-chip"><span class="label">PnL total</span><span class="value" id="s-pnl-total">—</span></div>
@@ -139,20 +155,32 @@
     <div class="stat-chip"><span class="label">Unrealized PnL</span><span class="value" id="s-upnl">—</span></div>
     <div class="stat-chip"><span class="label">Uptime desde</span><span class="value" id="s-uptime" style="font-size:11px">—</span></div>
     <div style="width:1px;background:#2d3150;align-self:stretch;margin:0 4px"></div>
-    <div class="stat-chip cfg-chip"><span class="label">Capital/Trade</span><span class="value" id="cfg-capital" style="font-size:13px">—</span></div>
-    <div class="stat-chip cfg-chip"><span class="label">Max Trades</span><span class="value" id="cfg-max-open" style="font-size:13px">—</span></div>
-    <div class="stat-chip cfg-chip"><span class="label">Max/Par</span><span class="value" id="cfg-max-pair" style="font-size:13px">—</span></div>
-    <div class="stat-chip cfg-chip"><span class="label">TP %</span><span class="value cfg-val-tp" id="cfg-tp" style="font-size:13px">—</span></div>
     <div class="stat-chip cfg-chip"><span class="label">TP Posición</span><span class="value" id="cfg-tp-posicion" style="font-size:13px">—</span></div>
     <div class="stat-chip cfg-chip" id="cfg-min-tp-chip" style="display:none"><span class="label">Min TP Pos %</span><span class="value cfg-val-tp" id="cfg-min-tp-posicion" style="font-size:13px">—</span></div>
-    <div class="stat-chip cfg-chip"><span class="label">SL %</span><span class="value cfg-val-sl" id="cfg-sl" style="font-size:13px">—</span></div>
+  </div>
+
+  <div class="status-bar paper-row" id="paper-status-bar">
+    <div class="stat-chip"><span class="label">Paper Trades Abiertos</span><span class="value" id="s-paper-open">—</span></div>
+    <div class="stat-chip"><span class="label">Paper PnL del día</span><span class="value" id="s-paper-pnl-day">—</span></div>
+    <div class="stat-chip"><span class="label">Paper PnL total</span><span class="value" id="s-paper-pnl-total">—</span></div>
+    <div class="stat-chip"><span class="label">Paper Trades Hoy</span><span class="value" id="s-paper-trades-today">—</span></div>
+    <div class="stat-chip"><span class="label">Paper Win Rate</span><span class="value" id="s-paper-wr">—</span></div>
+    <div class="stat-chip"><span class="label">Paper Unrealized PnL</span><span class="value" id="s-paper-upnl">—</span></div>
   </div>
 
   <!-- Switch agrupación -->
-  <div style="margin-bottom:15px;display:flex;align-items:center;gap:10px;background:#141726;padding:10px 15px;border-radius:8px;border:1px solid #232740;width:max-content;">
+  <div style="margin-bottom:15px;display:flex;align-items:center;gap:18px;flex-wrap:wrap;background:#141726;padding:10px 15px;border-radius:8px;border:1px solid #232740;width:max-content;">
     <label style="font-size:13px;color:#8b8fa8;cursor:pointer;display:flex;align-items:center;gap:8px;">
       <input type="checkbox" id="group-switch" onchange="toggleGroupView(this.checked)" style="accent-color:#2dc653;width:16px;height:16px;cursor:pointer;">
       <strong>Agrupar posiciones por Activo (Promediadas)</strong>
+    </label>
+    <label style="font-size:13px;color:#8b8fa8;cursor:pointer;display:flex;align-items:center;gap:8px;">
+      <input type="checkbox" id="show-paper-switch" checked onchange="togglePaperView(this.checked)" style="accent-color:#64b5f6;width:16px;height:16px;cursor:pointer;">
+      <strong>Ver trades paper</strong>
+    </label>
+    <label style="font-size:13px;color:#8b8fa8;cursor:pointer;display:flex;align-items:center;gap:8px;">
+      <input type="checkbox" id="show-real-switch" checked onchange="toggleRealView(this.checked)" style="accent-color:#2dc653;width:16px;height:16px;cursor:pointer;">
+      <strong>Ver trades reales</strong>
     </label>
   </div>
 
@@ -223,9 +251,13 @@
 let trades     = [];   // todos los trades recibidos
 let ws         = null;
 let livePrices = new Map(); // symbol → markPrice (caché Binance)
+let orphanPositions = [];
+let quarantineHours = 0;
 let sortCol    = 'created_at';
 let sortAsc    = false;
 let isGrouped  = false;
+let showPaperTrades = true;
+let showRealTrades = true;
 let wsRetry    = 1000;
 let fetchTimer = null;
 function requestTradesRefresh() {
@@ -245,8 +277,16 @@ function badge(status) {
     open:'OPEN', opening:'OPENING', closing:'CLOSING',
     closed:'CLOSED', not_executed:'NO EXEC', error:'ERROR',
     signal_received:'SEÑAL',
+    orphan_binance:'BINANCE',
   };
   return `<span class="badge ${status}">${labels[status] || status}</span>`;
+}
+
+function sourceBadge(source) {
+  if (source === 'paper') {
+    return ' <span title="Trade de paper trading" style="color:#8ecae6; font-size:9px; border:1px solid #8ecae6; padding:1px 3px; border-radius:3px; margin-left:5px; vertical-align:middle;">PAPER</span>';
+  }
+  return '';
 }
 
 function exitIcon(t) {
@@ -293,16 +333,37 @@ function toggleGroupView(checked) {
   if (typeof renderClosed === 'function') renderClosed();
 }
 
+function togglePaperView(checked) {
+  showPaperTrades = checked;
+  renderOpen();
+  renderClosed();
+}
+
+function toggleRealView(checked) {
+  showRealTrades = checked;
+  renderOpen();
+  renderClosed();
+}
+
+function isTradeVisibleBySource(trade) {
+  const source = trade?.source || 'real';
+  if (source === 'paper') return showPaperTrades;
+  if (source === 'binance') return showRealTrades;
+  return showRealTrades;
+}
+
 function getProcessedTrades(tradeList) {
   if (!isGrouped) return tradeList;
 
   const map = {};
   tradeList.forEach(t => {
-    if (!map[t.pair]) {
-      map[t.pair] = {
+    const key = `${t.source || 'real'}:${t.pair}`;
+    if (!map[key]) {
+      map[key] = {
         is_grouped:     true,
         count:          0,
         pair:           t.pair,
+        source:         t.source || 'real',
         status:         t.status,
         total_val:      0,
         entry_quantity: 0,
@@ -312,7 +373,7 @@ function getProcessedTrades(tradeList) {
         trade_id:       ''
       };
     }
-    const g = map[t.pair];
+    const g = map[key];
     g.count++;
     g.entry_quantity += (parseFloat(t.entry_quantity) || 0);
     g.total_val      += (parseFloat(t.entry_price)    || 0) * (parseFloat(t.entry_quantity) || 0);
@@ -326,6 +387,30 @@ function getProcessedTrades(tradeList) {
     g.trade_id    = `[${g.count} lotes]`;
     return g;
   });
+}
+
+function buildOrphanTrades() {
+  return (orphanPositions || []).map(p => ({
+    trade_id: `binance-orphan-${p.pair}`,
+    pair: p.pair,
+    status: 'orphan_binance',
+    source: 'binance',
+    side: p.side || 'SHORT',
+    entry_price: p.entry_price,
+    entry_quantity: Math.abs(parseFloat(p.position_amt) || 0),
+    tp_price: null,
+    tp_trigger_price: null,
+    sl_price: null,
+    sl_trigger_price: null,
+    created_at: p.detected_at,
+    entry_fill_ts: null,
+    updated_at: p.detected_at,
+    signal_data: {
+      top: 'BINANCE',
+      categoria: `${p.side || '—'} · sin DB`,
+    },
+    orphan_meta: p,
+  }));
 }
 
 // ─────────────────────────────────────────────────────────
@@ -354,9 +439,10 @@ function setSort(col) {
 // ─────────────────────────────────────────────────────────
 
 function renderOpen() {
-  const open = getProcessedTrades(trades.filter(t =>
-    ['open','opening','signal_received','closing'].includes(t.status)
-  ));
+  const open = getProcessedTrades([
+    ...trades.filter(t => ['open','opening','signal_received','closing'].includes(t.status) && isTradeVisibleBySource(t)),
+    ...(showRealTrades ? buildOrphanTrades() : []),
+  ]);
 
   open.sort((a, b) => {
     let valA, valB;
@@ -364,7 +450,10 @@ function renderOpen() {
       const calcPnl = t => {
         const ep = parseFloat(t.entry_price);
         const mp = livePrices.get(t.pair);
-        return (ep && mp) ? (ep - mp) / ep * 100 : -Infinity;
+        if (!(ep && mp)) return -Infinity;
+        return (t.side === 'LONG')
+          ? (mp - ep) / ep * 100
+          : (ep - mp) / ep * 100;
       };
       valA = calcPnl(a);
       valB = calcPnl(b);
@@ -394,20 +483,28 @@ function renderOpen() {
   }
 
   document.getElementById('tbl-open').innerHTML = open.map(t => {
-    const sizeUsdt = (t.entry_price && t.entry_quantity)
+    const sizeUsdt = t.status === 'orphan_binance'
+      ? ((t.orphan_meta?.notional != null) ? (+t.orphan_meta.notional).toFixed(2) : '—')
+      : (t.entry_price && t.entry_quantity)
       ? (+t.entry_price * +t.entry_quantity).toFixed(2)
       : '—';
-    return `<tr data-pair="${t.pair}" data-entry="${t.entry_price || ''}" data-qty="${t.entry_quantity || ''}">
-      <td><b>${t.pair}</b>${t.is_grouped ? ` <span class="muted">(${t.count})</span>` : ''}</td>
+    const topLabel = t.status === 'orphan_binance'
+      ? 'BINANCE'
+      : (t.is_grouped ? t.trade_id : (t.signal_data?.top || '—'));
+    const categoryLabel = t.status === 'orphan_binance'
+      ? `${t.orphan_meta?.side || '—'} · sin DB`
+      : (t.is_grouped ? '—' : (t.signal_data?.categoria || '—'));
+    return `<tr data-pair="${t.pair}" data-entry="${t.entry_price || ''}" data-qty="${t.entry_quantity || ''}" data-side="${t.side || 'SHORT'}" data-source="${t.source || 'real'}">
+      <td><b>${t.pair}</b>${sourceBadge(t.source)}${t.is_grouped ? ` <span class="muted">(${t.count})</span>` : ''}</td>
       <td>${badge(t.status)}</td>
       <td>${sizeUsdt !== '—' ? sizeUsdt + ' $' : '—'}</td>
       <td>${fmtPrice(t.entry_price)}</td>
-      <td>${fmtPrice(t.tp_price)} <span class="muted">(${fmtPrice(t.tp_trigger_price)})</span></td>
-      <td>${fmtPrice(t.sl_price)} <span class="muted">(${fmtPrice(t.sl_trigger_price)})</span></td>
+      <td>${t.status === 'orphan_binance' ? '—' : `${fmtPrice(t.tp_price)} <span class="muted">(${fmtPrice(t.tp_trigger_price)})</span>`}</td>
+      <td>${t.status === 'orphan_binance' ? '—' : `${fmtPrice(t.sl_price)} <span class="muted">(${fmtPrice(t.sl_trigger_price)})</span>`}</td>
       <td class="pnl-est-cell muted">…</td>
-      <td>${elapsed(t.entry_fill_ts || t.created_at)}</td>
-      <td class="muted">${t.is_grouped ? t.trade_id : (t.signal_data?.top || '—')}</td>
-      <td class="muted">${t.is_grouped ? '—' : (t.signal_data?.categoria || '—')}</td>
+      <td>${t.status === 'orphan_binance' ? 'Detectada' : elapsed(t.entry_fill_ts || t.created_at)}</td>
+      <td class="muted">${topLabel}</td>
+      <td class="muted">${categoryLabel}</td>
     </tr>`;
   }).join('');
   applyLivePnL();
@@ -415,7 +512,7 @@ function renderOpen() {
 
 function renderClosed() {
   const closed = getProcessedTrades(
-    trades.filter(t => ['closed','not_executed','error'].includes(t.status))
+    trades.filter(t => ['closed','not_executed','error'].includes(t.status) && isTradeVisibleBySource(t))
   ).sort((a,b) => (b.updated_at || b.exit_fill_ts || '').localeCompare(a.updated_at || a.exit_fill_ts || ''))
    .slice(0, 40);
 
@@ -426,18 +523,22 @@ function renderClosed() {
   }
 
   // --- Cálculo de Cuarentena Global ---
-  const QUARANTINE_MS = 4 * 60 * 60 * 1000; // 4 horas
+  const quarantineMs = quarantineHours > 0 ? quarantineHours * 60 * 60 * 1000 : 0;
+  const quarantineLabel = `${quarantineHours}h`;
   const nowMs = Date.now();
-  const lastClosedByPair = {};
+  const lastClosedByKey = {};
 
-  trades.forEach(t => {
-    if (t.status === 'closed' && t.exit_fill_ts) {
-      const ts = new Date(t.exit_fill_ts).getTime();
-      if (!lastClosedByPair[t.pair] || ts > lastClosedByPair[t.pair]) {
-        lastClosedByPair[t.pair] = ts;
+  if (quarantineMs > 0) {
+    trades.forEach(t => {
+      if (t.status === 'closed' && t.exit_fill_ts) {
+        const ts = new Date(t.exit_fill_ts).getTime();
+        const key = `${t.source || 'real'}:${t.pair}`;
+        if (!lastClosedByKey[key] || ts > lastClosedByKey[key]) {
+          lastClosedByKey[key] = ts;
+        }
       }
-    }
-  });
+    });
+  }
 
   document.getElementById('tbl-closed').innerHTML = closed.map(t => {
     const sizeUsdt = (t.entry_price && t.entry_quantity)
@@ -445,13 +546,13 @@ function renderClosed() {
       : '—';
 
     let quarantineBadge = '';
-    const lastClose = lastClosedByPair[t.pair];
-    if (lastClose && (nowMs - lastClose) < QUARANTINE_MS) {
-      quarantineBadge = ' <span title="En periodo de cuarentena preventiva" style="color:#f4a261; font-size:9px; border:1px solid #f4a261; padding:1px 3px; border-radius:3px; margin-left:5px; vertical-align:middle;">⏳ 4h</span>';
+    const lastClose = lastClosedByKey[`${t.source || 'real'}:${t.pair}`];
+    if (quarantineMs > 0 && lastClose && (nowMs - lastClose) < quarantineMs) {
+      quarantineBadge = ` <span title="En periodo de cuarentena preventiva" style="color:#f4a261; font-size:9px; border:1px solid #f4a261; padding:1px 3px; border-radius:3px; margin-left:5px; vertical-align:middle;">⏳ ${quarantineLabel}</span>`;
     }
 
     return `<tr>
-    <td><b>${t.pair}</b>${t.is_grouped ? ` <span class="muted">(${t.count})</span>` : ''}${quarantineBadge}</td>
+    <td><b>${t.pair}</b>${sourceBadge(t.source)}${t.is_grouped ? ` <span class="muted">(${t.count})</span>` : ''}${quarantineBadge}</td>
     <td>${badge(t.status)}</td>
     <td>${sizeUsdt !== '—' ? sizeUsdt + ' $' : '—'}</td>
     <td>${fmtPrice(t.entry_price)}</td>
@@ -468,9 +569,12 @@ function renderClosed() {
 }
 
 function renderStats() {
-  const openNow = trades.filter(t =>
-    ['open','opening','signal_received','closing'].includes(t.status)).length;
-  setStat('s-open', openNow, openNow > 0 ? 'warn' : '');
+  const realOpenNow = trades.filter(t =>
+    ['open','opening','signal_received','closing'].includes(t.status) &&
+    (t.source || 'real') === 'real'
+  ).length;
+  setStat('s-open', realOpenNow, realOpenNow > 0 ? 'warn' : '');
+  setStat('s-orphans', orphanPositions.length, orphanPositions.length > 0 ? 'warn' : '');
 }
 
 function setStat(id, val, cls='') {
@@ -484,34 +588,68 @@ function setStat(id, val, cls='') {
 // ─────────────────────────────────────────────────────────
 
 function applyLivePnL() {
-  let totalUpnlUsdt  = 0;
-  let activeCount    = 0;
-
   document.querySelectorAll('#tbl-open tr[data-pair]').forEach(row => {
     const entryPrice = parseFloat(row.dataset.entry);
     const qty        = parseFloat(row.dataset.qty);
     const markPrice  = livePrices.get(row.dataset.pair);
+    const side       = row.dataset.side || 'SHORT';
     const cell       = row.querySelector('.pnl-est-cell');
     if (!entryPrice || !markPrice || !cell) return;
 
-    const pnlPct  = (entryPrice - markPrice) / entryPrice * 100;
+    const pnlPct  = side === 'LONG'
+      ? (markPrice - entryPrice) / entryPrice * 100
+      : (entryPrice - markPrice) / entryPrice * 100;
     cell.textContent = (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(2) + '%';
     cell.className   = 'pnl-est-cell ' + (pnlPct >= 0 ? 'pos' : 'neg');
 
-    if (qty) {
-      totalUpnlUsdt += (entryPrice - markPrice) * qty;
-      activeCount++;
+  });
+
+  let realUpnlUsdt = 0;
+  let realActiveCount = 0;
+  let paperUpnlUsdt = 0;
+  let paperActiveCount = 0;
+
+  trades.forEach(t => {
+    if (!['open','opening','signal_received','closing'].includes(t.status)) return;
+    const source = t.source || 'real';
+    const entryPrice = parseFloat(t.entry_price);
+    const qty = parseFloat(t.entry_quantity);
+    const markPrice = livePrices.get(t.pair);
+    const side = t.side || 'SHORT';
+    if (!(entryPrice && qty && markPrice)) return;
+
+    const upnl = side === 'LONG'
+      ? (markPrice - entryPrice) * qty
+      : (entryPrice - markPrice) * qty;
+
+    if (source === 'paper') {
+      paperUpnlUsdt += upnl;
+      paperActiveCount++;
+    } else if (source === 'real') {
+      realUpnlUsdt += upnl;
+      realActiveCount++;
     }
   });
 
   const upnlEl = document.getElementById('s-upnl');
   if (upnlEl) {
-    if (activeCount > 0) {
-      upnlEl.textContent = (totalUpnlUsdt >= 0 ? '+' : '') + totalUpnlUsdt.toFixed(2) + ' USDT';
-      upnlEl.className   = 'value ' + (totalUpnlUsdt >= 0 ? 'pos' : 'neg');
+    if (realActiveCount > 0) {
+      upnlEl.textContent = (realUpnlUsdt >= 0 ? '+' : '') + realUpnlUsdt.toFixed(2) + ' USDT';
+      upnlEl.className   = 'value ' + (realUpnlUsdt >= 0 ? 'pos' : 'neg');
     } else {
       upnlEl.textContent = '—';
       upnlEl.className   = 'value';
+    }
+  }
+
+  const paperUpnlEl = document.getElementById('s-paper-upnl');
+  if (paperUpnlEl) {
+    if (paperActiveCount > 0) {
+      paperUpnlEl.textContent = (paperUpnlUsdt >= 0 ? '+' : '') + paperUpnlUsdt.toFixed(2) + ' USDT';
+      paperUpnlEl.className   = 'value ' + (paperUpnlUsdt >= 0 ? 'pos' : 'neg');
+    } else {
+      paperUpnlEl.textContent = '—';
+      paperUpnlEl.className   = 'value';
     }
   }
 }
@@ -627,8 +765,18 @@ function updateStatus(data) {
   if (data.ws_binance_connected !== undefined) {
     setDot('dot-ws-binance', data.ws_binance_connected ? 'green' : 'red');
   }
-  if (data.balance_usdt !== undefined) {
+  if (data.open_trades_real !== undefined) {
+    setStat('s-open', data.open_trades_real, data.open_trades_real > 0 ? 'warn' : '');
+  } else if (data.open_trades !== undefined) {
+    setStat('s-open', data.open_trades, data.open_trades > 0 ? 'warn' : '');
+  }
+  if (data.balance_usdt != null) {
     setStat('s-balance', (+data.balance_usdt).toFixed(2) + ' USDT');
+  }
+  if (Array.isArray(data.orphan_positions)) {
+    orphanPositions = data.orphan_positions;
+    setStat('s-orphans', orphanPositions.length, orphanPositions.length > 0 ? 'warn' : '');
+    renderOpen();
   }
   if (data.uptime_start) {
     const el = document.getElementById('s-uptime');
@@ -641,6 +789,19 @@ function updateStatus(data) {
       setStat('s-pnl-day', fmtUSDT(data.pnl_today_usdt) + ' USDT', pnlClass(data.pnl_today_usdt));
       setStat('s-trades-today', data.trades_today);
       setStat('s-wr', data.win_rate_pct + '%', data.win_rate_pct >= 50 ? 'pos' : 'neg');
+  }
+  if (data.open_trades_paper !== undefined) {
+      setStat('s-paper-open', data.open_trades_paper, data.open_trades_paper > 0 ? 'warn' : '');
+  }
+  if (data.paper_pnl_total_usdt !== undefined) {
+      setStat('s-paper-pnl-total', fmtUSDT(data.paper_pnl_total_usdt) + ' USDT', pnlClass(data.paper_pnl_total_usdt));
+      setStat('s-paper-pnl-day', fmtUSDT(data.paper_pnl_today_usdt) + ' USDT', pnlClass(data.paper_pnl_today_usdt));
+      setStat('s-paper-trades-today', data.paper_trades_today);
+      setStat('s-paper-wr', data.paper_win_rate_pct + '%', data.paper_win_rate_pct >= 50 ? 'pos' : 'neg');
+  }
+  const paperBar = document.getElementById('paper-status-bar');
+  if (paperBar && data.paper_trading !== undefined) {
+      paperBar.classList.toggle('active', !!data.paper_trading);
   }
 }
 
@@ -685,11 +846,19 @@ async function fetchConfig() {
       const el = document.getElementById(id);
       if (el) el.textContent = val != null ? val : '—';
     };
+    const paperTrading = !!s.paper_trading;
+    const soloCerrando = !!s.solo_cerrando_trades;
+    const paperBar = document.getElementById('paper-status-bar');
+    quarantineHours = Number(s.quarantine_hours ?? 0);
+    if (!Number.isFinite(quarantineHours) || quarantineHours < 0) {
+      quarantineHours = 0;
+    }
     setEl('cfg-capital',  s.capital_per_trade != null ? s.capital_per_trade + ' $' : '—');
     setEl('cfg-max-open', s.max_open_trades  != null ? s.max_open_trades        : '—');
     setEl('cfg-max-pair', s.max_trades_per_pair != null ? s.max_trades_per_pair : '—');
     setEl('cfg-tp',       s.tp_pct != null ? s.tp_pct + '%' : '—');
     setEl('cfg-sl',       s.sl_pct != null ? s.sl_pct + '%' : '—');
+    setEl('cfg-timeout-hours', s.timeout_hours != null ? s.timeout_hours + 'h' : '—');
     const tpPos = s.tp_pos != null ? s.tp_pos : s.TP_posicion;
     const tpPosEl = document.getElementById('cfg-tp-posicion');
     if (tpPosEl) {
@@ -701,6 +870,32 @@ async function fetchConfig() {
     setEl('cfg-min-tp-posicion', s.Min_TP_posicion != null ? s.Min_TP_posicion + '%' : '—');
     setEl('cfg-profile', profileMeta.loaded ? 'Activo' : 'No cargado');
     const summary = [];
+    if (s.capital_per_trade != null) {
+      summary.push(`${s.capital_per_trade}$`);
+    }
+    if (paperTrading) {
+      summary.push('max OFF');
+      summary.push('par OFF');
+    } else {
+      if (s.max_open_trades != null) {
+        summary.push(`max ${s.max_open_trades}`);
+      }
+      if (s.max_trades_per_pair != null) {
+        summary.push(`par ${s.max_trades_per_pair}`);
+      }
+    }
+    if (s.tp_pct != null) {
+      summary.push(`TP ${s.tp_pct}%`);
+    }
+    if (s.sl_pct != null) {
+      summary.push(`SL ${s.sl_pct}%`);
+    }
+    if (s.timeout_hours != null) {
+      summary.push(`hold ${s.timeout_hours}h`);
+    }
+    if (s.quarantine_hours != null) {
+      summary.push(`q ${s.quarantine_hours}h`);
+    }
     if (filters.rank_min != null || filters.rank_max != null) {
       summary.push(`rank ${filters.rank_min ?? '-'}-${filters.rank_max ?? '-'}`);
     }
@@ -713,6 +908,33 @@ async function fetchConfig() {
     if (filters.filtro_overlap) summary.push('overlap');
     if (filters.ignore_n) summary.push(`ignore ${filters.ignore_n}`);
     setEl('cfg-filters', summary.length ? summary.join(' | ') : 'Base');
+
+    const banner = document.getElementById('solo-cerrando-banner');
+    const paperBanner = document.getElementById('paper-trading-banner');
+    const timeoutEl = document.getElementById('solo-cerrando-timeout');
+    const paperExtraEl = document.getElementById('paper-trading-extra');
+    if (banner) {
+      banner.classList.toggle('active', soloCerrando && !paperTrading);
+    }
+    if (paperBanner) {
+      paperBanner.classList.toggle('active', paperTrading);
+    }
+    if (paperBar) {
+      paperBar.classList.toggle('active', paperTrading);
+    }
+    if (timeoutEl) {
+      timeoutEl.textContent = s.timeout_hours != null
+        ? `Timeout efectivo: ${s.timeout_hours}h`
+        : '';
+    }
+    if (paperExtraEl) {
+      const bits = [];
+      if (s.timeout_hours != null) bits.push(`Hold ${s.timeout_hours}h`);
+      bits.push('TP/SL por cierre 5m');
+      bits.push('Max abiertos OFF');
+      bits.push('Max por par OFF');
+      paperExtraEl.textContent = paperTrading ? bits.join(' · ') : '';
+    }
   } catch(e) { console.error('fetchConfig', e); }
 }
 
@@ -727,6 +949,7 @@ async function fetchConfig() {
   connect();
   updateLivePnL();                        // primera carga inmediata
   setInterval(updateLivePnL, 300000);     // refresco cada 5 minutos
+  setInterval(fetchStatus, 60000);        // refresco de estado/huérfanas cada 60s
   // Fallback: refresh completo cada 30s si WS se desconecta
   setInterval(() => {
     if (!ws || ws.readyState !== WebSocket.OPEN) {

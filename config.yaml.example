@@ -14,14 +14,15 @@ strategy:
   Min_TP_posicion: 0.0         # PnL minimo % combinado para disparar cascada TP (0 = deshabilitado)
   trigger_offset_pct: 10       # Compatibilidad historica; no se aplica hoy
   timeout_hours: 24            # Cerrar si no toca TP/SL en N horas
-  top_n: 1                     # Cuantos ranks procesar (1 = solo top1)
+  solo_cerrando_trades: false  # true = no abre trades nuevos; solo gestiona cierres de los ya abiertos
+  paper_trading: false         # true = nuevas señales en paper; el trading real pasa a solo cerrando
   leverage: 1                  # Apalancamiento (1 = sin apalancamiento)
   min_momentum_pct: 0          # Compat legacy: si hay perfil, momentum_min pisa este valor
   min_vol_ratio: 0             # Compat legacy: si hay perfil, vol_ratio_min pisa este valor
   min_trades_ratio: 0          # Compat legacy: si hay perfil, trades_ratio_min pisa este valor
   allowed_quintiles: [1, 2, 3, 4, 5]   # Compat legacy: si hay perfil, usa quintiles del YAML exportado
   max_trades_per_pair: 1
-  quarantine_hours: 4.0
+  quarantine_hours: 4.0      # 0 = sin cuarentena tras un cierre
 
 strategy_profile:
   path: "estrategia/filtros_gestiona_trades.yaml"   # perfil exportado por dashboard_top5.html

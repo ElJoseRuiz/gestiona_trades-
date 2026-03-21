@@ -592,6 +592,15 @@ class TradeEngine:
                     try:
                         await self._order_mgr.cancel_order(sig.pair, order_id)
                     except BinanceError as e:
+                        if e.code == -2011:
+                            recovered = await self._recover_entry_after_unknown_cancel(
+                                trade=trade,
+                                pair=sig.pair,
+                                order_id=order_id,
+                                client_oid=client_oid,
+                            )
+                            if recovered:
+                                return
                         # Si ya se llenó en la cancelación, lo captura el WS
                         log.warning(f"Cancel order {order_id}: {e}")
                     self._ws_mgr.unregister(order_id)
@@ -709,6 +718,56 @@ class TradeEngine:
                 return False
             await asyncio.sleep(0.2)
         return False
+
+    async def _recover_entry_after_unknown_cancel(self,
+                                                  trade: Trade,
+                                                  pair: str,
+                                                  order_id: int,
+                                                  client_oid: str) -> bool:
+        """
+        Si cancel_order devuelve -2011, consulta el estado real de la orden
+        antes de lanzar un nuevo intento. Esto evita duplicar entradas cuando
+        Binance ya ejecutó la orden pero el fill no llegó al bot a tiempo.
+        """
+        try:
+            order = await self._order_mgr.get_order(pair, order_id)
+        except Exception as e:
+            log.warning(
+                f"Trade {trade.trade_id[:8]}: no se pudo recuperar orderId={order_id} "
+                f"tras cancel -2011: {e}"
+            )
+            return False
+
+        status = str(order.get("status") or "").upper()
+        executed_qty = float(order.get("executedQty") or order.get("z") or 0)
+        avg_price = float(
+            order.get("avgPrice") or
+            order.get("ap") or
+            order.get("price") or
+            order.get("L") or 0
+        )
+
+        log.warning(
+            f"Trade {trade.trade_id[:8]}: cancel -2011 para orderId={order_id}; "
+            f"Binance reporta status={status} executedQty={executed_qty}"
+        )
+
+        if executed_qty <= 0:
+            return False
+
+        trade.entry_quantity = executed_qty
+        trade.entry_order_id = order_id
+        trade.touch()
+        await self._db.save_trade(trade)
+
+        synthetic_fill = {
+            "i": order_id,
+            "c": client_oid,
+            "ap": str(avg_price),
+            "L": str(avg_price),
+        }
+        await self.on_entry_fill(synthetic_fill)
+        return True
 
     # ──────────────────────────────────────────────────────────────────
     # Callbacks del WebSocket
@@ -1017,6 +1076,89 @@ class TradeEngine:
     # Cierre en cascada posicional
     # ──────────────────────────────────────────────────────────────────
 
+    def _cascade_trade_sigue_activo(self, trade: Trade) -> bool:
+        actual = self._trades.get(trade.trade_id)
+        return actual is trade and actual.status == TradeStatus.CLOSING
+
+    async def _cerrar_cascade_si_posicion_ya_no_existe(self,
+                                                        trade: Trade,
+                                                        etapa: str) -> bool:
+        """Sincroniza cierres en cascada que llegan tarde respecto a Binance."""
+        if not self._cascade_trade_sigue_activo(trade):
+            log.info(
+                f"Trade {trade.trade_id[:8]} cascada abortada en {etapa}: "
+                "el trade ya no sigue activo en CLOSING"
+            )
+            return True
+
+        try:
+            position = await self._order_mgr.get_position(trade.pair)
+        except Exception as e:
+            log.warning(
+                f"Trade {trade.trade_id[:8]} no pudo verificar posición "
+                f"real en {etapa}: {e}"
+            )
+            return False
+
+        if position is not None:
+            return False
+
+        log.info(
+            f"Trade {trade.trade_id[:8]} cascada detecta posición plana "
+            f"en Binance durante {etapa} -> CLOSED"
+        )
+        if not trade.exit_price:
+            trade.exit_price = 0.0
+        trade.exit_fill_ts = trade.exit_fill_ts or datetime.now(timezone.utc).isoformat()
+        trade.exit_type = trade.exit_type or ExitType.MANUAL.value
+        await self._close_trade(trade)
+        return True
+
+    async def _resolver_reduce_only_rechazado_en_cascada(self,
+                                                          trade: Trade,
+                                                          etapa: str) -> bool:
+        """Evita marcar ERROR si Binance ya no permite otra orden reduceOnly."""
+        if not self._cascade_trade_sigue_activo(trade):
+            log.info(
+                f"Trade {trade.trade_id[:8]} ignora -2022 en {etapa}: "
+                "el trade ya no seguía activo en CLOSING"
+            )
+            return True
+
+        if await self._cerrar_cascade_si_posicion_ya_no_existe(
+            trade, f"{etapa} tras -2022"
+        ):
+            return True
+
+        try:
+            open_orders = await self._order_mgr.get_open_orders(trade.pair)
+            hay_reduce_only = any(
+                str(o.get("side", "")).upper() == "BUY"
+                and str(o.get("reduceOnly", "")).lower() == "true"
+                for o in open_orders
+            )
+        except Exception as e:
+            hay_reduce_only = False
+            log.warning(
+                f"Trade {trade.trade_id[:8]} no pudo inspeccionar órdenes "
+                f"abiertas tras -2022 en {etapa}: {e}"
+            )
+
+        if hay_reduce_only:
+            detalle = "Hay otra orden reduceOnly viva para el par."
+        else:
+            detalle = "No se detectó otra orden reduceOnly viva."
+
+        log.warning(
+            f"Trade {trade.trade_id[:8]} cascada {etapa}: Binance rechazó "
+            f"reduceOnly (-2022) pero la posición del par sigue abierta. "
+            f"{detalle} Se mantiene en CLOSING para que la reconciliación "
+            "resuelva el estado real."
+        )
+        trade.touch()
+        await self._db.save_trade(trade)
+        return True
+
     async def _close_sibling_trades(self, pair: str, trigger_type: str, exclude_trade_id: str):
         """
         Cierra trades hermanos en cascada con un modelo Maker Progresivo.
@@ -1073,6 +1215,17 @@ class TradeEngine:
             await self._cancel_counterpart(t, "sl")
 
             try:
+                if await self._cerrar_cascade_si_posicion_ya_no_existe(
+                    t, "inicio de cascada"
+                ):
+                    return
+                if not self._cascade_trade_sigue_activo(t):
+                    log.info(
+                        f"Trade {t.trade_id[:8]} cascada abortada: "
+                        "el trade ya fue resuelto antes de iniciar"
+                    )
+                    return
+
                 if trigger_type == "TP":
                     bid = await self._order_mgr.get_best_bid(pair)
                     ask = await self._order_mgr.get_best_ask(pair)
@@ -1102,6 +1255,17 @@ class TradeEngine:
                             return
 
                         # --- Expiración Intento 1 ---
+                        if await self._cerrar_cascade_si_posicion_ya_no_existe(
+                            t, "tras esperar el intento 1"
+                        ):
+                            return
+                        if not self._cascade_trade_sigue_activo(t):
+                            log.info(
+                                f"Trade {t.trade_id[:8]} cascada abortada tras "
+                                "el intento 1: ya no seguía activo"
+                            )
+                            return
+
                         log.info(f"Trade {t.trade_id[:8]} Intento 1 expirado. Evaluando Intento 2.")
                         od_1 = await self._order_mgr.get_order(t.pair, close_oid_1)
                         status_1 = od_1.get("status", "")
@@ -1122,6 +1286,17 @@ class TradeEngine:
                             t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
                             t.exit_type = "TP_CASCADE_LIMIT_1_LATE"
                             await self._close_trade(t)
+                            return
+
+                        if await self._cerrar_cascade_si_posicion_ya_no_existe(
+                            t, "antes del intento 2"
+                        ):
+                            return
+                        if not self._cascade_trade_sigue_activo(t):
+                            log.info(
+                                f"Trade {t.trade_id[:8]} cascada abortada antes "
+                                "del intento 2: ya no seguía activo"
+                            )
                             return
 
                         # --- INTENTO 2: LIMIT (Maker Agresivo) ---
@@ -1152,6 +1327,17 @@ class TradeEngine:
                             return
 
                         # --- Expiración Intento 2 ---
+                        if await self._cerrar_cascade_si_posicion_ya_no_existe(
+                            t, "tras esperar el intento 2"
+                        ):
+                            return
+                        if not self._cascade_trade_sigue_activo(t):
+                            log.info(
+                                f"Trade {t.trade_id[:8]} cascada abortada tras "
+                                "el intento 2: ya no seguía activo"
+                            )
+                            return
+
                         log.info(f"Trade {t.trade_id[:8]} Intento 2 expirado. Purgando remanente a MARKET.")
                         od_2 = await self._order_mgr.get_order(t.pair, close_oid_2)
                         status_2 = od_2.get("status", "")
@@ -1187,6 +1373,17 @@ class TradeEngine:
                     else:
                         log.info(f"Trade {t.trade_id[:8]} en cascada TP (PERDIENDO). Liquidación agresiva (MARKET)")
 
+                if await self._cerrar_cascade_si_posicion_ya_no_existe(
+                    t, "antes del fallback MARKET"
+                ):
+                    return
+                if not self._cascade_trade_sigue_activo(t):
+                    log.info(
+                        f"Trade {t.trade_id[:8]} cascada abortada antes del "
+                        "fallback MARKET: ya no seguía activo"
+                    )
+                    return
+
                 # Fallback Estructural / Perdedores Directos
                 result = await self._order_mgr.close_position_market(t.pair, t.entry_quantity)
                 exit_price = float(result.get("avgPrice") or result.get("price") or 0)
@@ -1196,6 +1393,18 @@ class TradeEngine:
                 t.exit_type = f"{trigger_type}_CASCADE_MKT"
                 await self._close_trade(t)
 
+            except BinanceError as e:
+                if e.code == -2022:
+                    handled = await self._resolver_reduce_only_rechazado_en_cascada(
+                        t, "cierre en cascada"
+                    )
+                    if handled:
+                        return
+                log.error(f"Error cerrando en cascada trade {t.trade_id[:8]}: {e}", exc_info=True)
+                t.status = TradeStatus.ERROR
+                t.error_message = f"Cascade close error: {e}"
+                t.touch()
+                await self._db.save_trade(t)
             except Exception as e:
                 log.error(f"Error cerrando en cascada trade {t.trade_id[:8]}: {e}", exc_info=True)
                 t.status = TradeStatus.ERROR

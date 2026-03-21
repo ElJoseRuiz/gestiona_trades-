@@ -211,6 +211,35 @@ class OrderManager:
         data = await self._get("/fapi/v1/premiumIndex", {"symbol": symbol})
         return float(data["markPrice"])
 
+    async def get_last_closed_kline(self, symbol: str, interval: str = "5m") -> dict:
+        """
+        Devuelve la última vela cerrada para el símbolo/intervalo.
+        Binance suele devolver también la vela actual abierta como último
+        elemento, por eso pedimos limit=2 y usamos la penúltima.
+        """
+        data = await self._get(
+            "/fapi/v1/klines",
+            {"symbol": symbol, "interval": interval, "limit": 2},
+        )
+        if not isinstance(data, list) or not data:
+            raise ValueError(f"Sin klines para {symbol} {interval}")
+
+        kline = data[-2] if len(data) >= 2 else data[-1]
+        return {
+            "open_time": int(kline[0]),
+            "open": float(kline[1]),
+            "high": float(kline[2]),
+            "low": float(kline[3]),
+            "close": float(kline[4]),
+            "close_time": int(kline[6]),
+        }
+
+    async def calc_tp_trigger(self, symbol: str, entry_price: float) -> float:
+        """Calcula y redondea el nivel TP para un SHORT."""
+        info = await self.get_exchange_info(symbol)
+        return _round_price(entry_price * (1 - self._cfg.tp_pct / 100),
+                            info["tick_size"])
+
     async def calc_sl_trigger(self, symbol: str, entry_price: float) -> float:
         """Calcula y redondea el stopPrice del SL para un SHORT."""
         info = await self.get_exchange_info(symbol)

@@ -126,7 +126,6 @@ strategy:
   tp_pct: 1.0               # Take profit %
   sl_pct: 2.0               # Stop loss %
   timeout_hours: 24         # Cierre forzado por tiempo
-  top_n: 3                  # Procesar sólo las N mejores señales
 
 signals:
   file_path: "fut_pares_short.csv"
@@ -407,6 +406,7 @@ async def run():
 
 - Idioma de comentarios y mensajes: español.
 - Mantener todos los archivos de texto en UTF-8 limpio y sin mojibake; si aparece texto mal codificado, corregirlo antes de dar la tarea por cerrada.
+- Todas las copias de seguridad, incluidas las de `AGENTS.md` y cualquier otro backup auxiliar, deben guardarse dentro de `./backups/` y no en la raíz del repositorio.
 - Antes de modificar `gestiona_trades.py`, crear siempre una copia de seguridad en `./backups/` con formato `gestiona_trades.YYYYMMDD-HHMMSS.py`.
 - No hacer cambios en `gestiona_trades.py` sin haber creado esa copia previa en la misma sesion de trabajo.
 - Antes de modificar `./static/control_mision.html`, crear siempre una copia de seguridad en `./backups/` con formato `control_mision.YYYYMMDD-HHMMSS.py`.

@@ -60,6 +60,7 @@ def _trade_to_dict(t: Trade) -> dict:
         "created_at":       t.created_at,
         "updated_at":       t.updated_at,
         "signal_data":      t.signal_data,
+        "source":           getattr(t, "source", "real"),
     }
 
 
