@@ -38,6 +38,7 @@ log = get_logger("order_manager")
 _RETRY_CODES = {429, 500, 502, 503, 504}
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 1.5          # segundos
+ORDER_MANAGER_VERSION = "0.11"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -73,7 +74,7 @@ class OrderManager:
             headers={"X-MBX-APIKEY": self._cfg.api_key},
             connector=aiohttp.TCPConnector(limit=50),
         )
-        log.info("OrderManager inicializado")
+        log.info(f"OrderManager v{ORDER_MANAGER_VERSION} inicializado")
 
     async def close(self):
         if self._session:
@@ -397,6 +398,22 @@ class OrderManager:
         return await self._get("/fapi/v1/order",
                                {"symbol": symbol, "orderId": order_id},
                                signed=True)
+
+    async def get_user_trades(self,
+                              symbol: str,
+                              start_time_ms: int | None = None,
+                              end_time_ms: int | None = None,
+                              limit: int = 1000) -> list:
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "limit": max(1, min(int(limit), 1000)),
+        }
+        if start_time_ms is not None:
+            params["startTime"] = int(start_time_ms)
+        if end_time_ms is not None:
+            params["endTime"] = int(end_time_ms)
+        data = await self._get("/fapi/v1/userTrades", params, signed=True)
+        return data if isinstance(data, list) else []
 
     # ──────────────────────────────────────────────────────────────────
     # TP / SL vía servicio Algo de Binance (/fapi/v1/algoOrder)

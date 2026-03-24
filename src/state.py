@@ -182,21 +182,37 @@ class StateDB:
         active_trades = active_real + active_paper
         active_ids = {t.trade_id for t in active_trades}
 
-        target_total = max(limit, len(active_trades))
-        closed_budget = max(target_total - len(active_trades), 0)
-
-        recent_real = await self._load_trades_from_table("trades", limit=target_total, source="real")
-        recent_paper = await self._load_trades_from_table("paper_trades", limit=target_total, source="paper")
-        closed_candidates = [
-            t for t in (recent_real + recent_paper)
-            if t.trade_id not in active_ids
-        ]
-        closed_candidates.sort(key=lambda t: (t.updated_at or t.created_at or ""), reverse=True)
-        selected_closed = closed_candidates[:closed_budget]
+        recent_real = await self._load_terminal_from_table("trades", limit=limit, source="real")
+        recent_paper = await self._load_terminal_from_table("paper_trades", limit=limit, source="paper")
+        closed_candidates = [t for t in (recent_real + recent_paper) if t.trade_id not in active_ids]
+        closed_candidates.sort(
+            key=lambda t: (t.exit_fill_ts or t.updated_at or t.created_at or ""),
+            reverse=True,
+        )
+        selected_closed = closed_candidates[:limit]
 
         merged = active_trades + selected_closed
         merged.sort(key=lambda t: (t.updated_at or t.created_at or ""), reverse=True)
         return merged
+
+    async def _load_terminal_from_table(self,
+                                        table: str,
+                                        limit: int,
+                                        source: str) -> List[Trade]:
+        terminal = (
+            TradeStatus.CLOSED.value,
+            TradeStatus.NOT_EXECUTED.value,
+            TradeStatus.ERROR.value,
+        )
+        placeholders = ",".join("?" * len(terminal))
+        sql = (
+            f"SELECT * FROM {table} "
+            f"WHERE status IN ({placeholders}) "
+            "ORDER BY COALESCE(exit_fill_ts, updated_at, created_at) DESC LIMIT ?"
+        )
+        async with self._db.execute(sql, (*terminal, limit)) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_trade(r, source=source) for r in rows]
 
     async def _load_trades_from_table(self,
                                       table: str,
@@ -304,6 +320,89 @@ class StateDB:
 
     async def get_paper_daily_metrics(self) -> dict:
         return await self._get_daily_metrics_from_table("paper_trades")
+
+    async def get_dashboard_summary(self, paper: bool = False) -> dict:
+        table = "paper_trades" if paper else "trades"
+        return await self._get_dashboard_summary_from_table(table)
+
+    async def _get_dashboard_summary_from_table(self, table: str) -> dict:
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        active_statuses = (
+            TradeStatus.OPEN.value,
+            TradeStatus.OPENING.value,
+            TradeStatus.SIGNAL_RECEIVED.value,
+            TradeStatus.CLOSING.value,
+        )
+        sql = f"""
+            SELECT
+                SUM(CASE WHEN status IN (?,?,?,?) THEN 1 ELSE 0 END) AS open_total,
+                SUM(CASE WHEN status IN (?,?,?,?)
+                          AND COALESCE(entry_fill_ts, created_at, '') LIKE ? THEN 1 ELSE 0 END) AS open_today,
+                SUM(CASE WHEN entry_fill_ts IS NOT NULL THEN 1 ELSE 0 END) AS entries_total,
+                SUM(CASE WHEN entry_fill_ts LIKE ? THEN 1 ELSE 0 END) AS entries_today,
+                SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed_total,
+                SUM(CASE WHEN status = 'closed' AND pnl_usdt > 0 THEN 1 ELSE 0 END) AS wins_total,
+                SUM(CASE WHEN status = 'closed' THEN pnl_usdt ELSE 0 END) AS pnl_total,
+                SUM(CASE WHEN status = 'closed'
+                          AND COALESCE(exit_fill_ts, updated_at, '') LIKE ? THEN 1 ELSE 0 END) AS closed_today,
+                SUM(CASE WHEN status = 'closed'
+                          AND COALESCE(exit_fill_ts, updated_at, '') LIKE ?
+                          AND pnl_usdt > 0 THEN 1 ELSE 0 END) AS wins_today,
+                SUM(CASE WHEN status = 'closed'
+                          AND COALESCE(exit_fill_ts, updated_at, '') LIKE ? THEN pnl_usdt ELSE 0 END) AS pnl_today,
+                SUM(CASE WHEN status = 'closed'
+                          AND COALESCE(exit_fill_ts, updated_at, '') LIKE ?
+                          AND COALESCE(exit_type, '') <> 'manual' THEN 1 ELSE 0 END) AS closed_today_non_manual,
+                SUM(CASE WHEN status = 'closed'
+                          AND COALESCE(exit_fill_ts, updated_at, '') LIKE ?
+                          AND COALESCE(exit_type, '') <> 'manual'
+                          AND pnl_usdt > 0 THEN 1 ELSE 0 END) AS wins_today_non_manual
+            FROM {table}
+        """
+        params = (
+            *active_statuses,
+            *active_statuses,
+            f"{today_str}%",
+            f"{today_str}%",
+            f"{today_str}%",
+            f"{today_str}%",
+            f"{today_str}%",
+            f"{today_str}%",
+            f"{today_str}%",
+        )
+        async with self._db.execute(sql, params) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            return {
+                "open_total": 0,
+                "open_today": 0,
+                "entries_total": 0,
+                "entries_today": 0,
+                "closed_total": 0,
+                "wins_total": 0,
+                "pnl_total": 0.0,
+                "closed_today": 0,
+                "wins_today": 0,
+                "pnl_today": 0.0,
+                "closed_today_non_manual": 0,
+                "wins_today_non_manual": 0,
+            }
+
+        return {
+            "open_total": row[0] or 0,
+            "open_today": row[1] or 0,
+            "entries_total": row[2] or 0,
+            "entries_today": row[3] or 0,
+            "closed_total": row[4] or 0,
+            "wins_total": row[5] or 0,
+            "pnl_total": row[6] or 0.0,
+            "closed_today": row[7] or 0,
+            "wins_today": row[8] or 0,
+            "pnl_today": row[9] or 0.0,
+            "closed_today_non_manual": row[10] or 0,
+            "wins_today_non_manual": row[11] or 0,
+        }
 
     async def _get_daily_metrics_from_table(self, table: str) -> dict:
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")

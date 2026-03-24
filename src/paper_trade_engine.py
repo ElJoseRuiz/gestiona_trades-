@@ -9,6 +9,7 @@ paper_trade_engine.py - Motor de paper trading sin ejecucion real en Binance.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Dict, Optional
 
@@ -21,6 +22,10 @@ from .state import StateDB
 log = get_logger("paper_trade_engine")
 
 OnEventCallback = Callable[[Event], Awaitable[None]]
+PAPER_TRADE_ENGINE_VERSION = "0.19"
+_PAPER_KLINE_INTERVAL_S = 300
+_PAPER_KLINE_GRACE_S = 10
+_KLINE_WARNING_INTERVAL_S = 300.0
 
 
 class PaperTradeEngine:
@@ -39,6 +44,12 @@ class PaperTradeEngine:
         self._open_tasks: set[asyncio.Task] = set()
         self._ignore_cycles: Dict[str, dict] = {}
         self._last_pair_candle_close_ms: Dict[str, int] = {}
+        self._pair_kline_failures: Dict[str, dict] = {}
+        self._session_started_at: Optional[str] = None
+
+    @property
+    def session_started_at(self) -> Optional[str]:
+        return self._session_started_at
 
     @property
     def open_count(self) -> int:
@@ -71,9 +82,11 @@ class PaperTradeEngine:
             log.info(f"Restaurados {len(trades)} trades paper activos desde la DB")
 
     async def start(self):
+        if self._session_started_at is None:
+            self._session_started_at = datetime.now(timezone.utc).isoformat()
         self._timeout_task = asyncio.create_task(self._timeout_loop(), name="paper_timeout_checker")
         self._candle_task = asyncio.create_task(self._candle_loop(), name="paper_candle_checker")
-        log.info("PaperTradeEngine iniciado")
+        log.info(f"PaperTradeEngine v{PAPER_TRADE_ENGINE_VERSION} iniciado")
 
     async def stop(self):
         for task in (self._timeout_task, self._candle_task):
@@ -92,6 +105,70 @@ class PaperTradeEngine:
                 exit_type=ExitType.MANUAL.value,
                 reason="paper_trading_off_startup",
             )
+
+    async def finish_paper_trading(self) -> dict:
+        await self._stop_background_tasks_for_finish()
+
+        try:
+            if self._session_started_at is None:
+                self._session_started_at = datetime.now(timezone.utc).isoformat()
+
+            requested_at = datetime.now(timezone.utc).isoformat()
+            active_trades = list(self.get_active_trades())
+            tradable_trades = [
+                t for t in active_trades
+                if t.entry_price is not None and t.entry_quantity is not None
+            ]
+            pending_trades = [t for t in active_trades if t not in tradable_trades]
+
+            pair_prices: Dict[str, dict] = {}
+            for pair in sorted({t.pair for t in tradable_trades}):
+                kline = await self._order_mgr.get_last_closed_kline(pair, interval="5m")
+                close_time_ms = int(kline["close_time"])
+                pair_prices[pair] = {
+                    "exit_price": float(kline["close"]),
+                    "candle_close_utc": datetime.fromtimestamp(
+                        close_time_ms / 1000.0,
+                        tz=timezone.utc,
+                    ).isoformat(),
+                }
+
+            cancelled_pending = 0
+            for trade in pending_trades:
+                await self._cancel_pending_trade_for_finish(trade, requested_at)
+                cancelled_pending += 1
+
+            closed_open_trades = 0
+            for trade in tradable_trades:
+                pair_snapshot = pair_prices[trade.pair]
+                await self._close_trade_at_price(
+                    trade,
+                    exit_price=pair_snapshot["exit_price"],
+                    exit_ts=requested_at,
+                    exit_type=ExitType.MANUAL.value,
+                    reason="fin_paper_trading",
+                    extra_details={
+                        "price_source": "last_closed_kline_5m",
+                        "candle_close_utc": pair_snapshot["candle_close_utc"],
+                    },
+                )
+                closed_open_trades += 1
+
+            log.info(
+                f"Fin paper trading completado: {closed_open_trades} trades cerrados "
+                f"y {cancelled_pending} pendientes cancelados."
+            )
+            return {
+                "session_started_at": self._session_started_at,
+                "requested_at": requested_at,
+                "active_trades_before_finish": len(active_trades),
+                "closed_open_trades": closed_open_trades,
+                "cancelled_pending_trades": cancelled_pending,
+                "pair_prices": pair_prices,
+            }
+        except Exception:
+            await self._restart_background_tasks_after_finish_error()
+            raise
 
     async def on_signal(self, sig: Signal):
         if self._cfg.signal_filter_overlap and self.open_count_pair(sig.pair) > 0:
@@ -278,43 +355,153 @@ class PaperTradeEngine:
 
     async def _candle_loop(self):
         while True:
-            await asyncio.sleep(60)
             try:
                 await self._check_paper_tp_sl()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 log.error(f"Error en paper candle_loop: {e}", exc_info=True)
+            await asyncio.sleep(self._seconds_until_next_paper_candle_check())
+
+    def _seconds_until_next_paper_candle_check(self) -> float:
+        now_ts = time.time()
+        next_close_ts = (int(now_ts / _PAPER_KLINE_INTERVAL_S) + 1) * _PAPER_KLINE_INTERVAL_S
+        target_ts = next_close_ts + _PAPER_KLINE_GRACE_S
+        return max(1.0, target_ts - now_ts)
 
     async def _check_paper_tp_sl(self):
         open_pairs = sorted({t.pair for t in self._trades.values() if t.status == TradeStatus.OPEN})
         for pair in open_pairs:
-            kline = await self._order_mgr.get_last_closed_kline(pair, interval="5m")
+            try:
+                kline = await self._order_mgr.get_last_closed_kline(pair, interval="5m")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._log_kline_fetch_failure(pair, e)
+                continue
+            self._log_kline_fetch_recovered(pair)
             close_time = int(kline["close_time"])
             if self._last_pair_candle_close_ms.get(pair) == close_time:
                 continue
             self._last_pair_candle_close_ms[pair] = close_time
-            close_price = float(kline["close"])
+            price_ctx = self._resolve_paper_tp_sl_price_context(kline)
             exit_ts = datetime.now(timezone.utc).isoformat()
 
-            pair_trades = sorted(
-                [t for t in self._trades.values() if t.pair == pair and t.status == TradeStatus.OPEN],
-                key=lambda t: t.entry_fill_ts or t.created_at,
+            pair_trades = [
+                t for t in self._trades.values()
+                if t.pair == pair and t.status == TradeStatus.OPEN
+            ]
+            trigger_trade, trigger_type = self._select_pair_trigger_trade(
+                pair_trades,
+                tp_check_price=price_ctx["tp_check_price"],
+                sl_check_price=price_ctx["sl_check_price"],
             )
-            for trade in pair_trades:
-                if self._trades.get(trade.trade_id) is not trade or trade.status != TradeStatus.OPEN:
-                    continue
-                if trade.sl_trigger_price is not None and close_price >= trade.sl_trigger_price:
-                    await self._close_trade_by_signal(trade, ExitType.SL.value, close_price, exit_ts)
-                    continue
-                if trade.tp_trigger_price is not None and close_price <= trade.tp_trigger_price:
-                    await self._close_trade_by_signal(trade, ExitType.TP.value, close_price, exit_ts)
+            if trigger_trade and trigger_type:
+                exit_price = (
+                    price_ctx["tp_exit_price"]
+                    if trigger_type == ExitType.TP.value
+                    else price_ctx["sl_exit_price"]
+                )
+                await self._close_trade_by_signal(
+                    trigger_trade,
+                    trigger_type,
+                    exit_price,
+                    exit_ts,
+                    price_ctx["price_source"],
+                )
+
+    def _select_pair_trigger_trade(self,
+                                   pair_trades: list[Trade],
+                                   tp_check_price: float,
+                                   sl_check_price: float) -> tuple[Optional[Trade], Optional[str]]:
+        eligible_trades = [
+            t for t in pair_trades
+            if self._trades.get(t.trade_id) is t and t.status == TradeStatus.OPEN
+        ]
+        if not eligible_trades:
+            return None, None
+
+        sl_candidates = [
+            t for t in eligible_trades
+            if t.sl_trigger_price is not None and sl_check_price >= t.sl_trigger_price
+        ]
+        if sl_candidates:
+            # En SHORT, el SL que se toca primero es el de trigger mas bajo.
+            return min(
+                sl_candidates,
+                key=lambda t: (
+                    float(t.sl_trigger_price or 0.0),
+                    t.entry_fill_ts or t.created_at,
+                ),
+            ), ExitType.SL.value
+
+        tp_candidates = [
+            t for t in eligible_trades
+            if t.tp_trigger_price is not None and tp_check_price <= t.tp_trigger_price
+        ]
+        if tp_candidates:
+            # En SHORT, el TP que se toca primero es el de trigger mas alto.
+            return min(
+                tp_candidates,
+                key=lambda t: (
+                    -float(t.tp_trigger_price or 0.0),
+                    t.entry_fill_ts or t.created_at,
+                ),
+            ), ExitType.TP.value
+
+        return None, None
+
+    def _resolve_paper_tp_sl_price_context(self, kline: dict) -> dict[str, float | str]:
+        close_price = float(kline["close"])
+        if self._cfg.paper_tp_sl_price_mode == "high_low_5m":
+            return {
+                "tp_check_price": float(kline["low"]),
+                "sl_check_price": float(kline["high"]),
+                "tp_exit_price": float(kline["low"]),
+                "sl_exit_price": float(kline["high"]),
+                "price_source": "kline_5m_high_low",
+            }
+
+        return {
+            "tp_check_price": close_price,
+            "sl_check_price": close_price,
+            "tp_exit_price": close_price,
+            "sl_exit_price": close_price,
+            "price_source": "kline_5m_close",
+        }
+
+    def _log_kline_fetch_failure(self, pair: str, error: Exception):
+        now = time.monotonic()
+        state = self._pair_kline_failures.setdefault(
+            pair,
+            {"count": 0, "last_log_at": 0.0},
+        )
+        state["count"] += 1
+        if now - state["last_log_at"] < _KLINE_WARNING_INTERVAL_S:
+            return
+
+        state["last_log_at"] = now
+        log.warning(
+            f"No se pudo revisar TP/SL PAPER para {pair} en vela 5m: {error} "
+            f"(fallos consecutivos: {state['count']})"
+        )
+
+    def _log_kline_fetch_recovered(self, pair: str):
+        state = self._pair_kline_failures.pop(pair, None)
+        if not state or state.get("count", 0) <= 0:
+            return
+
+        log.info(
+            f"Recuperada la revision TP/SL PAPER de {pair} tras "
+            f"{state['count']} fallo(s) consecutivo(s)"
+        )
 
     async def _close_trade_by_signal(self,
                                      trade: Trade,
                                      exit_type: str,
                                      exit_price: float,
-                                     exit_ts: str):
+                                     exit_ts: str,
+                                     price_source: str):
         trade.status = TradeStatus.CLOSING
         trade.exit_price = exit_price
         trade.exit_fill_ts = exit_ts
@@ -327,26 +514,56 @@ class PaperTradeEngine:
             "price": exit_price,
             "paper": True,
             "candle_5m": True,
+            "price_source": price_source,
         })
         await self._close_trade(trade)
 
         if exit_type == ExitType.TP.value and self._cfg.tp_posicion:
-            await self._close_sibling_trades(trade.pair, "TP", trade.trade_id, exit_price, exit_ts)
+            await self._close_sibling_trades(
+                trade.pair,
+                "TP",
+                trade.trade_id,
+                exit_price,
+                exit_ts,
+                price_source,
+            )
         if exit_type == ExitType.SL.value and self._cfg.sl_posicion:
-            await self._close_sibling_trades(trade.pair, "SL", trade.trade_id, exit_price, exit_ts)
+            await self._close_sibling_trades(
+                trade.pair,
+                "SL",
+                trade.trade_id,
+                exit_price,
+                exit_ts,
+                price_source,
+            )
 
     async def _close_sibling_trades(self,
                                     pair: str,
                                     trigger_type: str,
                                     exclude_trade_id: str,
                                     exit_price: float,
-                                    exit_ts: str):
+                                    exit_ts: str,
+                                    price_source: str):
         siblings = [
             t for t in list(self._trades.values())
             if t.pair == pair and t.trade_id != exclude_trade_id and t.status == TradeStatus.OPEN
         ]
         if not siblings:
             return
+
+        if trigger_type == "TP":
+            min_tp_pct = self._cfg.min_tp_posicion_pct
+            if min_tp_pct > 0:
+                total_cost = sum((t.entry_price or 0.0) * (t.entry_quantity or 0.0) for t in siblings)
+                total_value = sum(exit_price * (t.entry_quantity or 0.0) for t in siblings)
+                if total_cost > 0:
+                    combined_pnl_pct = ((total_cost - total_value) / total_cost) * 100.0
+                    if combined_pnl_pct < min_tp_pct:
+                        log.info(
+                            f"Cascada TP PAPER abortada para {pair}: PnL combinado hermanos "
+                            f"({combined_pnl_pct:.2f}%) < Min_TP_posicion ({min_tp_pct:.2f}%)"
+                        )
+                        return
 
         log.info(
             f"Cierre en cascada PAPER ({trigger_type}_posicion=True) "
@@ -368,6 +585,7 @@ class PaperTradeEngine:
                     "paper": True,
                     "cascade": True,
                     "candle_5m": True,
+                    "price_source": price_source,
                 },
             )
             await self._close_trade(trade)
@@ -403,6 +621,67 @@ class PaperTradeEngine:
         else:
             await self._emit(EventType.CANCEL, trade.trade_id, details)
         await self._close_trade(trade)
+
+    async def _close_trade_at_price(self,
+                                    trade: Trade,
+                                    exit_price: float,
+                                    exit_ts: str,
+                                    exit_type: str,
+                                    reason: str,
+                                    extra_details: Optional[dict] = None):
+        if self._trades.get(trade.trade_id) is not trade:
+            return
+
+        trade.status = TradeStatus.CLOSING
+        trade.exit_price = exit_price
+        trade.exit_fill_ts = exit_ts
+        trade.exit_type = exit_type
+        trade.touch()
+        await self._db.save_paper_trade(trade)
+
+        details = dict(extra_details or {})
+        details.setdefault("reason", reason)
+        details.setdefault("paper", True)
+        await self._emit(EventType.CANCEL, trade.trade_id, details)
+        await self._close_trade(trade)
+
+    async def _cancel_pending_trade_for_finish(self, trade: Trade, exit_ts: str):
+        if self._trades.get(trade.trade_id) is not trade:
+            return
+
+        trade.status = TradeStatus.NOT_EXECUTED
+        trade.error_message = "Paper trading finalizado antes del fill de entrada"
+        trade.exit_fill_ts = exit_ts
+        trade.exit_type = ExitType.MANUAL.value
+        trade.touch()
+        await self._db.save_paper_trade(trade)
+        self._trades.pop(trade.trade_id, None)
+        await self._emit(
+            EventType.CANCEL,
+            trade.trade_id,
+            {
+                "reason": "fin_paper_trading_pending",
+                "paper": True,
+            },
+        )
+
+    async def _stop_background_tasks_for_finish(self):
+        for attr in ("_timeout_task", "_candle_task"):
+            task = getattr(self, attr, None)
+            if not task:
+                continue
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            setattr(self, attr, None)
+
+    async def _restart_background_tasks_after_finish_error(self):
+        if self._timeout_task is None:
+            self._timeout_task = asyncio.create_task(self._timeout_loop(), name="paper_timeout_checker")
+        if self._candle_task is None:
+            self._candle_task = asyncio.create_task(self._candle_loop(), name="paper_candle_checker")
 
     async def _close_trade(self, trade: Trade):
         if trade.entry_price and trade.exit_price and trade.entry_quantity:

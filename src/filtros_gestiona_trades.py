@@ -18,6 +18,7 @@ import yaml
 
 SUPPORTED_SCHEMA_VERSION = 1
 DEFAULT_PROFILE_PATH = "estrategia/filtros_gestiona_trades.yaml"
+FILTROS_GESTIONA_TRADES_VERSION = "0.12"
 
 
 @dataclass(slots=True)
@@ -117,6 +118,7 @@ def _normalize_profile(data: dict[str, Any], warnings: list[str], path: Path) ->
             "tp_pct": _as_float(gestion_trade.get("tp_pct")),
             "sl_pos": _as_bool(gestion_trade.get("sl_pos"), default=False),
             "tp_pos": _as_bool(gestion_trade.get("tp_pos"), default=False),
+            "min_tp_posicion": _as_float(gestion_trade.get("min_tp_posicion")),
             "global_tp": _as_float(gestion_trade.get("global_tp")),
             "global_tp_win": _as_bool(gestion_trade.get("global_tp_win"), default=False),
             "max_hold": _as_float(gestion_trade.get("max_hold")),

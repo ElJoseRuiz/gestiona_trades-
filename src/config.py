@@ -15,6 +15,8 @@ from .filtros_gestiona_trades import (
     load_filtros_gestiona_trades,
 )
 
+CONFIG_VERSION = "0.13"
+
 
 class Config:
     def __init__(self, path: str = "config.yaml"):
@@ -113,6 +115,7 @@ class Config:
         strategy["sl_pct"] = self.sl_pct
         strategy["TP_posicion"] = self.tp_posicion
         strategy["SL_posicion"] = self.sl_posicion
+        strategy["Min_TP_posicion"] = self.min_tp_posicion_pct
         strategy["tp_pos"] = self.tp_posicion
         strategy["sl_pos"] = self.sl_posicion
         strategy["timeout_hours"] = self.timeout_hours
@@ -121,6 +124,7 @@ class Config:
         strategy["quarantine_hours"] = self.quarantine_hours
         strategy["solo_cerrando_trades"] = self.real_trading_solo_cerrando
         strategy["paper_trading"] = self.paper_trading
+        strategy["paper_tp_sl_price_mode"] = self.paper_tp_sl_price_mode
         strategy["solo_cerrando_trades_config"] = self.solo_cerrando_trades
         return strategy
 
@@ -255,7 +259,13 @@ class Config:
 
     @property
     def min_tp_posicion_pct(self) -> float:
-        return float(self._get("strategy", "Min_TP_posicion", default=0.0))
+        return float(
+            self._effective_value(
+                ("gestion_trade", "min_tp_posicion"),
+                ("strategy", "Min_TP_posicion"),
+                default=0.0,
+            )
+        )
 
     @property
     def trigger_offset_pct(self)  -> float:      return float(self._get("strategy", "trigger_offset_pct",default=10))
@@ -283,6 +293,21 @@ class Config:
     @property
     def paper_trading(self) -> bool:
         return self._as_bool(self._get("strategy", "paper_trading", default=False), default=False)
+
+    @property
+    def paper_tp_sl_price_mode(self) -> str:
+        raw = str(self._get("strategy", "paper_tp_sl_price_mode", default="close_5m") or "close_5m")
+        mode = raw.strip().lower()
+        aliases = {
+            "close": "close_5m",
+            "close_5m": "close_5m",
+            "cierre_5m": "close_5m",
+            "high_low": "high_low_5m",
+            "high_low_5m": "high_low_5m",
+            "hl_5m": "high_low_5m",
+            "intravela_5m": "high_low_5m",
+        }
+        return aliases.get(mode, "close_5m")
     @property
     def real_trading_solo_cerrando(self) -> bool:
         return self.solo_cerrando_trades or self.paper_trading
@@ -506,6 +531,7 @@ class Config:
                 "sl_pct": self._profile_has("gestion_trade", "sl_pct") and self._profile_get("gestion_trade", "sl_pct") is not None,
                 "tp_pos": self._profile_has("gestion_trade", "tp_pos") and self._profile_get("gestion_trade", "tp_pos") is not None,
                 "sl_pos": self._profile_has("gestion_trade", "sl_pos") and self._profile_get("gestion_trade", "sl_pos") is not None,
+                "min_tp_posicion": self._profile_has("gestion_trade", "min_tp_posicion") and self._profile_get("gestion_trade", "min_tp_posicion") is not None,
                 "max_hold": self._profile_has("gestion_trade", "max_hold") and self._profile_get("gestion_trade", "max_hold") is not None,
                 "max_par": self._profile_has("limites", "max_par") and self._profile_get("limites", "max_par") is not None,
                 "max_global": self._profile_has("limites", "max_global") and self._profile_get("limites", "max_global") is not None,

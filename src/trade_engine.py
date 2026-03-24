@@ -39,6 +39,7 @@ from .ws_manager import WSManager
 log = get_logger("trade_engine")
 
 OnEventCallback = Callable[[Event], Awaitable[None]]
+TRADE_ENGINE_VERSION = "0.11"
 
 
 class TradeEngine:
@@ -78,7 +79,7 @@ class TradeEngine:
         self._reconcile_task = asyncio.create_task(
             self._reconcile_loop(), name="reconcile_checker"
         )
-        log.info("TradeEngine iniciado")
+        log.info(f"TradeEngine v{TRADE_ENGINE_VERSION} iniciado")
 
     async def stop(self):
         if self._timeout_task:
@@ -124,6 +125,234 @@ class TradeEngine:
                 if t.status not in (TradeStatus.CLOSED,
                                     TradeStatus.NOT_EXECUTED,
                                     TradeStatus.ERROR)]
+
+    @staticmethod
+    def _parse_iso_dt(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    async def _get_last_startup_dt(self) -> datetime | None:
+        events = await self._db.get_last_events(200)
+        for ev in events:
+            if ev.event_type != EventType.STARTUP.value:
+                continue
+            dt = self._parse_iso_dt(ev.timestamp)
+            if dt:
+                return dt
+        return None
+
+    async def _infer_external_close_from_binance(self, trade: Trade) -> Optional[dict]:
+        if not trade.pair or not trade.entry_price:
+            return None
+
+        if trade.tp_order_id:
+            try:
+                tp_order = await self._order_mgr.get_order(trade.pair, int(trade.tp_order_id))
+                if tp_order.get("status") == "FILLED":
+                    exit_price = float(tp_order.get("avgPrice") or tp_order.get("price") or 0.0)
+                    update_time_ms = int(tp_order.get("updateTime") or tp_order.get("time") or 0)
+                    return {
+                        "exit_type": ExitType.TP.value,
+                        "exit_price": exit_price,
+                        "exit_fill_ts": datetime.fromtimestamp(
+                            (update_time_ms or int(datetime.now(timezone.utc).timestamp() * 1000)) / 1000.0,
+                            tz=timezone.utc,
+                        ).isoformat(),
+                        "source": "tp_order_history",
+                        "matched_order_id": int(trade.tp_order_id),
+                    }
+            except BinanceError as e:
+                log.debug(
+                    f"Reconciliación: TP {trade.tp_order_id} de {trade.trade_id[:8]} "
+                    f"no consultable por REST: {e}"
+                )
+            except Exception as e:
+                log.debug(
+                    f"Reconciliación: error leyendo TP {trade.tp_order_id} de "
+                    f"{trade.trade_id[:8]}: {e}"
+                )
+
+        startup_dt = await self._get_last_startup_dt()
+        candidate_dt = max(
+            dt for dt in (
+                startup_dt,
+                self._parse_iso_dt(trade.entry_fill_ts),
+                self._parse_iso_dt(trade.updated_at),
+                self._parse_iso_dt(trade.created_at),
+            )
+            if dt is not None
+        )
+        start_dt = candidate_dt - timedelta(minutes=5)
+
+        try:
+            raw_trades = await self._order_mgr.get_user_trades(
+                trade.pair,
+                start_time_ms=int(start_dt.timestamp() * 1000),
+                limit=200,
+            )
+        except Exception as e:
+            log.warning(
+                f"Reconciliación: no se pudieron leer ejecuciones recientes de Binance "
+                f"para {trade.pair}: {e}"
+            )
+            return None
+
+        close_buckets = self._build_recent_close_buckets(raw_trades)
+        if not close_buckets:
+            return None
+
+        best = self._pick_recent_close_bucket(trade, close_buckets)
+        if not best:
+            return None
+
+        return {
+            "exit_type": best["exit_type"],
+            "exit_price": best["avg_price"],
+            "exit_fill_ts": datetime.fromtimestamp(
+                best["last_time_ms"] / 1000.0,
+                tz=timezone.utc,
+            ).isoformat(),
+            "source": "user_trades_recent",
+            "matched_order_id": best["order_id"],
+            "matched_qty": round(best["qty"], 8),
+        }
+
+    def _build_recent_close_buckets(self, user_trades: list[dict]) -> list[dict]:
+        buckets: dict[int, dict] = {}
+        for item in user_trades:
+            side = self._extract_user_trade_side(item)
+            if side != "BUY":
+                continue
+
+            order_id = int(item.get("orderId") or item.get("orderID") or 0)
+            price = float(item.get("price") or 0.0)
+            qty = float(item.get("qty") or item.get("executedQty") or 0.0)
+            time_ms = int(item.get("time") or item.get("T") or 0)
+            if order_id <= 0 or price <= 0 or qty <= 0 or time_ms <= 0:
+                continue
+
+            bucket = buckets.setdefault(order_id, {
+                "order_id": order_id,
+                "qty": 0.0,
+                "notional": 0.0,
+                "first_time_ms": time_ms,
+                "last_time_ms": time_ms,
+                "fills": 0,
+            })
+            bucket["qty"] += qty
+            bucket["notional"] += price * qty
+            bucket["first_time_ms"] = min(bucket["first_time_ms"], time_ms)
+            bucket["last_time_ms"] = max(bucket["last_time_ms"], time_ms)
+            bucket["fills"] += 1
+
+        result: list[dict] = []
+        for bucket in buckets.values():
+            qty = bucket["qty"]
+            if qty <= 0:
+                continue
+            bucket["avg_price"] = bucket["notional"] / qty
+            result.append(bucket)
+        result.sort(key=lambda item: item["last_time_ms"], reverse=True)
+        return result
+
+    @staticmethod
+    def _extract_user_trade_side(item: dict) -> str:
+        side = str(item.get("side") or "").upper()
+        if side in {"BUY", "SELL"}:
+            return side
+
+        buyer = item.get("buyer")
+        if isinstance(buyer, bool):
+            return "BUY" if buyer else "SELL"
+        if isinstance(buyer, str):
+            value = buyer.strip().lower()
+            if value in {"true", "1"}:
+                return "BUY"
+            if value in {"false", "0"}:
+                return "SELL"
+        return ""
+
+    def _pick_recent_close_bucket(self, trade: Trade, buckets: list[dict]) -> Optional[dict]:
+        entry_price = float(trade.entry_price or 0.0)
+        entry_qty = float(trade.entry_quantity or 0.0)
+        tp_ref = float(trade.tp_price or trade.tp_trigger_price or 0.0)
+        sl_ref = float(trade.sl_price or trade.sl_trigger_price or 0.0)
+        best: Optional[dict] = None
+
+        for bucket in buckets:
+            avg_price = float(bucket["avg_price"])
+            qty = float(bucket["qty"])
+            qty_diff = (abs(qty - entry_qty) / entry_qty) if entry_qty > 0 else 1.0
+            dist_tp = abs(avg_price - tp_ref) / tp_ref if tp_ref > 0 else 999.0
+            dist_sl = abs(avg_price - sl_ref) / sl_ref if sl_ref > 0 else 999.0
+
+            exit_type = ExitType.TP.value if dist_tp <= dist_sl else ExitType.SL.value
+            close_dist = min(dist_tp, dist_sl)
+            score = close_dist + min(qty_diff, 1.0) * 0.35
+
+            if exit_type == ExitType.TP.value and avg_price > entry_price:
+                score += 0.5
+            if exit_type == ExitType.SL.value and avg_price < entry_price:
+                score += 0.5
+
+            candidate = dict(bucket)
+            candidate["exit_type"] = exit_type
+            candidate["qty_diff"] = qty_diff
+            candidate["close_dist"] = close_dist
+            candidate["score"] = score
+
+            if best is None or candidate["score"] < best["score"]:
+                best = candidate
+
+        if not best:
+            return None
+
+        if best["qty_diff"] > 0.40 and best["close_dist"] > 0.03:
+            return None
+
+        if best["close_dist"] > 0.12:
+            return None
+
+        return best
+
+    async def _apply_reconciled_close(self, trade: Trade, reason_msg: str) -> None:
+        resolved = await self._infer_external_close_from_binance(trade)
+        if resolved:
+            trade.status = TradeStatus.CLOSING
+            trade.exit_price = resolved["exit_price"]
+            trade.exit_fill_ts = resolved["exit_fill_ts"]
+            trade.exit_type = resolved["exit_type"]
+            trade.touch()
+            await self._db.save_trade(trade)
+
+            event_type = EventType.TP_FILL if trade.exit_type == ExitType.TP.value else EventType.SL_FILL
+            await self._emit(event_type, trade.trade_id, {
+                "price": trade.exit_price,
+                "orderId": resolved.get("matched_order_id"),
+                "reconcile": True,
+                "source": resolved.get("source"),
+            })
+            log.info(
+                f"Reconciliación: trade {trade.trade_id[:8]} ({trade.pair}) "
+                f"cerrado externamente como {trade.exit_type.upper()} "
+                f"@ {trade.exit_price}"
+            )
+            await self._close_trade(trade)
+            return
+
+        trade.status = TradeStatus.CLOSED
+        trade.exit_type = ExitType.MANUAL.value
+        trade.exit_fill_ts = trade.exit_fill_ts or datetime.now(timezone.utc).isoformat()
+        trade.touch()
+        await self._db.save_trade(trade)
+        self._trades.pop(trade.trade_id, None)
+        await self._emit(EventType.ERROR, trade.trade_id, {
+            "msg": reason_msg
+        })
 
     # ──────────────────────────────────────────────────────────────────
     # Reconciliación
@@ -246,22 +475,17 @@ class TradeEngine:
             log.warning(
                 f"Reconciliación: trade {t.trade_id[:8]} ({t.pair}) "
                 "OPEN en DB pero sin posición en Binance "
-                "→ Cancelando TP/SL huérfanos y marcando CLOSED"
+                "→ Cancelando TP/SL huérfanos y resolviendo el motivo de cierre"
             )
 
             # --- LIMPIEZA ACTIVA DE ÓRDENES CONDICIONALES ---
             await self._cancel_counterpart(t, "tp")
             await self._cancel_counterpart(t, "sl")
             # ------------------------------------------------
-
-            t.status   = TradeStatus.CLOSED
-            t.exit_type = ExitType.MANUAL.value
-            t.touch()
-            await self._db.save_trade(t)
-            self._trades.pop(t.trade_id, None)
-            await self._emit(EventType.ERROR, t.trade_id, {
-                "msg": "Reconciliación: posición cerrada externamente"
-            })
+            await self._apply_reconciled_close(
+                t,
+                "Reconciliación: posición cerrada externamente",
+            )
             return
 
         # Obtener órdenes abiertas del par (regulares + algo)
@@ -395,6 +619,22 @@ class TradeEngine:
                 f"Reconciliación: trade {t.trade_id[:8]} CLOSING "
                 "→ posición ya cerrada en Binance → CLOSED"
             )
+            if not t.exit_type or t.exit_type == ExitType.MANUAL.value or not t.exit_price:
+                resolved = await self._infer_external_close_from_binance(t)
+                if resolved:
+                    t.exit_price = resolved["exit_price"]
+                    t.exit_fill_ts = resolved["exit_fill_ts"]
+                    t.exit_type = resolved["exit_type"]
+                    await self._emit(
+                        EventType.TP_FILL if t.exit_type == ExitType.TP.value else EventType.SL_FILL,
+                        t.trade_id,
+                        {
+                            "price": t.exit_price,
+                            "orderId": resolved.get("matched_order_id"),
+                            "reconcile": True,
+                            "source": resolved.get("source"),
+                        },
+                    )
             if not t.exit_price:
                 t.exit_price = 0.0
             t.exit_fill_ts = (t.exit_fill_ts

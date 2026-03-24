@@ -13,6 +13,8 @@
   .topbar{background:#141726;border-bottom:1px solid #232740;padding:10px 16px;
     display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
   .topbar h1{font-size:15px;color:#e0e3f0;letter-spacing:1px}
+  .brand-block{display:flex;flex-direction:column;gap:2px}
+  .brand-version{font-size:10px;color:#6b7294;letter-spacing:.8px;text-transform:uppercase}
   .main{padding:12px 14px;display:flex;flex-direction:column;gap:12px}
 
   /* ── Status bar ── */
@@ -109,6 +111,7 @@
   .btn{padding:4px 10px;border-radius:5px;border:1px solid #3a3d52;
     background:#1a1d2e;color:#c9cde0;cursor:pointer;font-size:11px;font-family:inherit}
   .btn:hover{background:#232740;border-color:#64b5f6}
+  .btn:disabled{opacity:.55;cursor:not-allowed}
   .btn-danger{border-color:#e6394660;color:#e63946}
   .btn-danger:hover{background:#2a1010}
 </style>
@@ -118,8 +121,11 @@
 <!-- ── Topbar ── -->
 <div class="topbar">
   <div style="display:flex;align-items:center;gap:14px">
-    <div style="display:flex; align-items: baseline; gap: 15px;">
-      <h1>📈 Gestiona Trades</h1>
+    <div style="display:flex; align-items: center; gap: 15px;">
+      <div class="brand-block">
+        <h1>📈 Gestiona Trades</h1>
+        <div class="brand-version">control_mision v0.22</div>
+      </div>
       <a href="/history" target="_blank" style="font-size:11px; background:#252850; padding:3px 8px; border-radius:4px; border:1px solid #3a3d52; color:#c9cde0;">📊 Ver Analítica Histórica</a>
     </div>
     <div class="conn-row">
@@ -143,16 +149,19 @@
 
   <div id="paper-trading-banner" class="warning-banner">
     <strong>PAPER TRADING ACTIVO</strong> · Las nuevas señales se ejecutan en paper y no envían órdenes a Binance. El trading real queda en modo solo cerrando. <span id="paper-trading-extra" class="muted"></span>
+    <div style="margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <button class="btn btn-danger" id="btn-finish-paper" onclick="finishPaperTrading()">Fin Paper Trading</button>
+      <span id="paper-finish-status" class="muted"></span>
+    </div>
   </div>
 
   <!-- Status chips -->
   <div class="status-bar" id="status-bar">
     <div class="stat-chip"><span class="label">Trades abiertos</span><span class="value" id="s-open">—</span></div>
-    <div class="stat-chip"><span class="label">PnL del día</span><span class="value" id="s-pnl-day">—</span></div>
-    <div class="stat-chip"><span class="label">PnL total</span><span class="value" id="s-pnl-total">—</span></div>
-    <div class="stat-chip"><span class="label">Trades hoy</span><span class="value" id="s-trades-today">—</span></div>
-    <div class="stat-chip"><span class="label">Win Rate</span><span class="value" id="s-wr">—</span></div>
     <div class="stat-chip"><span class="label">Unrealized PnL</span><span class="value" id="s-upnl">—</span></div>
+    <div class="stat-chip"><span class="label">Trades cerrados (hoy-total)</span><span class="value" id="s-trades-today">—</span></div>
+    <div class="stat-chip"><span class="label">Win Rate (hoy-total)</span><span class="value" id="s-wr">—</span></div>
+    <div class="stat-chip"><span class="label">PnL (hoy-total)</span><span class="value" id="s-pnl-total">—</span></div>
     <div class="stat-chip"><span class="label">Uptime desde</span><span class="value" id="s-uptime" style="font-size:11px">—</span></div>
     <div style="width:1px;background:#2d3150;align-self:stretch;margin:0 4px"></div>
     <div class="stat-chip cfg-chip"><span class="label">TP Posición</span><span class="value" id="cfg-tp-posicion" style="font-size:13px">—</span></div>
@@ -160,12 +169,12 @@
   </div>
 
   <div class="status-bar paper-row" id="paper-status-bar">
-    <div class="stat-chip"><span class="label">Paper Trades Abiertos</span><span class="value" id="s-paper-open">—</span></div>
-    <div class="stat-chip"><span class="label">Paper PnL del día</span><span class="value" id="s-paper-pnl-day">—</span></div>
-    <div class="stat-chip"><span class="label">Paper PnL total</span><span class="value" id="s-paper-pnl-total">—</span></div>
-    <div class="stat-chip"><span class="label">Paper Trades Hoy</span><span class="value" id="s-paper-trades-today">—</span></div>
-    <div class="stat-chip"><span class="label">Paper Win Rate</span><span class="value" id="s-paper-wr">—</span></div>
+    <div class="stat-chip"><span class="label">Paper Trades abiertos</span><span class="value" id="s-paper-open">—</span></div>
     <div class="stat-chip"><span class="label">Paper Unrealized PnL</span><span class="value" id="s-paper-upnl">—</span></div>
+    <div class="stat-chip"><span class="label">Paper Trades cerrados (hoy-total)</span><span class="value" id="s-paper-trades-today">—</span></div>
+    <div class="stat-chip"><span class="label">Paper Win Rate (hoy-total)</span><span class="value" id="s-paper-wr">—</span></div>
+    <div class="stat-chip"><span class="label">Paper PnL (hoy-total)</span><span class="value" id="s-paper-pnl-total">—</span></div>
+    <div class="stat-chip cfg-chip"><span class="label">Paper TP/SL</span><span class="value" id="cfg-paper-tp-sl-mode" style="font-size:13px">—</span></div>
   </div>
 
   <!-- Switch agrupación -->
@@ -198,15 +207,16 @@
             <th style="cursor:pointer" onclick="setSort('status')"         data-sort="status">Estado</th>
             <th style="cursor:pointer" onclick="setSort('entry_quantity')" data-sort="entry_quantity">Size USDT</th>
             <th style="cursor:pointer" onclick="setSort('entry_price')"    data-sort="entry_price">Entry Price</th>
+            <th>Entrada</th>
             <th style="cursor:pointer" onclick="setSort('tp_price')"       data-sort="tp_price">TP / Trigger</th>
             <th style="cursor:pointer" onclick="setSort('sl_price')"       data-sort="sl_price">SL / Trigger</th>
             <th style="cursor:pointer" onclick="setSort('pnl_est')" data-sort="pnl_est">PnL est. %</th>
-            <th style="cursor:pointer" onclick="setSort('created_at')"     data-sort="created_at">Tiempo ▼</th>
+            <th style="cursor:pointer" onclick="setSort('open_time')"     data-sort="open_time">Tiempo ▼</th>
             <th style="cursor:pointer" onclick="setSort('signal_data.top')" data-sort="signal_data.top">Señal top</th>
             <th style="cursor:pointer" onclick="setSort('signal_data.categoria')" data-sort="signal_data.categoria">Categoría</th>
           </tr>
         </thead>
-        <tbody id="tbl-open"><tr><td class="no-data" colspan="10">Sin trades abiertos</td></tr></tbody>
+        <tbody id="tbl-open"><tr><td class="no-data" colspan="11">Sin trades abiertos</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -220,12 +230,12 @@
       <table>
         <thead>
           <tr>
-            <th>Par</th><th>Estado</th><th>Size USDT</th><th>Entry</th><th>Exit</th>
+            <th>Par</th><th>Estado</th><th>Size USDT</th><th>Entry</th><th>Entrada</th><th>Exit</th><th>Salida</th>
             <th>PnL USDT</th><th>PnL %</th><th>Motivo</th>
             <th>Duración</th><th>Fees</th><th>Señal top</th><th>Categoría</th>
           </tr>
         </thead>
-        <tbody id="tbl-closed"><tr><td class="no-data" colspan="12">—</td></tr></tbody>
+        <tbody id="tbl-closed"><tr><td class="no-data" colspan="14">—</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -242,7 +252,7 @@
   </div>
 
 </div>
-<div class="footer">gestiona_trades v1 · actualización en tiempo real vía WebSocket</div>
+<div class="footer">control_mision v0.22 · actualización en tiempo real vía WebSocket</div>
 
 <script>
 // ─────────────────────────────────────────────────────────
@@ -253,13 +263,15 @@ let ws         = null;
 let livePrices = new Map(); // symbol → markPrice (caché Binance)
 let orphanPositions = [];
 let quarantineHours = 0;
-let sortCol    = 'created_at';
+let sortCol    = 'open_time';
 let sortAsc    = false;
 let isGrouped  = false;
 let showPaperTrades = true;
 let showRealTrades = true;
 let wsRetry    = 1000;
 let fetchTimer = null;
+let paperFinishRunning = false;
+let latestStatusData = {};
 function requestTradesRefresh() {
     clearTimeout(fetchTimer);
     fetchTimer = setTimeout(fetchTrades, 800); // 800ms de gracia para consolidar escrituras DB
@@ -323,6 +335,75 @@ function fmtTs(ts) {
   } catch(e) { return ts.slice(11,19); }
 }
 
+function fmtDateTime(ts) {
+  if (!ts) return '—';
+  try {
+    return new Date(ts).toLocaleString('es-ES', {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).replace(',', '');
+  } catch(e) {
+    return String(ts).replace('T', ' ').slice(0, 16);
+  }
+}
+
+function pctText(value) {
+  if (value == null || Number.isNaN(Number(value))) return 'N/A';
+  return `${Number(value).toFixed(1)}%`;
+}
+
+function comboCountText(todayVal, totalVal) {
+  return `${todayVal ?? 0} / ${totalVal ?? 0}`;
+}
+
+function valuePartHtml(text, rawValue) {
+  const num = Number(rawValue);
+  const cls = Number.isFinite(num) && num < 0 ? 'neg' : '';
+  return `<span${cls ? ` class="${cls}"` : ''}>${text}</span>`;
+}
+
+function comboPctHtml(todayVal, totalVal) {
+  return `${valuePartHtml(pctText(todayVal), todayVal)} / ${valuePartHtml(pctText(totalVal), totalVal)}`;
+}
+
+function comboPnlHtml(todayVal, totalVal) {
+  return `${valuePartHtml(fmtUSDT(todayVal), todayVal)} / ${valuePartHtml(fmtUSDT(totalVal), totalVal)} USDT`;
+}
+
+function paperTpSlModeText(mode) {
+  return mode === 'high_low_5m' ? 'High/Low 5m' : 'Close 5m';
+}
+
+function renderSummaryStats() {
+  const realOpenCurrent = Number(latestStatusData.open_trades_real ?? 0);
+  const paperOpenCurrent = Number(latestStatusData.open_trades_paper ?? 0);
+  const realClosedTotal = Number(latestStatusData.trades_total ?? 0);
+  const paperClosedTotal = Number(latestStatusData.paper_trades_total ?? 0);
+  const realClosedToday = Number(latestStatusData.trades_today ?? 0);
+  const paperClosedToday = Number(latestStatusData.paper_trades_today ?? 0);
+  const realWinRateToday = latestStatusData.win_rate_today_pct;
+  const paperWinRateToday = latestStatusData.paper_win_rate_today_pct;
+  const realWinRateTotal = latestStatusData.win_rate_pct;
+  const paperWinRateTotal = latestStatusData.paper_win_rate_pct;
+  const realPnlToday = latestStatusData.pnl_today_usdt;
+  const realPnlTotal = latestStatusData.pnl_total_usdt;
+  const paperPnlToday = latestStatusData.paper_pnl_today_usdt;
+  const paperPnlTotal = latestStatusData.paper_pnl_total_usdt;
+
+  setStat('s-open', realOpenCurrent);
+  setStat('s-trades-today', comboCountText(realClosedToday, realClosedTotal));
+  setStatHtml('s-wr', comboPctHtml(realWinRateToday, realWinRateTotal));
+  setStatHtml('s-pnl-total', comboPnlHtml(realPnlToday, realPnlTotal));
+
+  setStat('s-paper-open', paperOpenCurrent);
+  setStat('s-paper-trades-today', comboCountText(paperClosedToday, paperClosedTotal));
+  setStatHtml('s-paper-wr', comboPctHtml(paperWinRateToday, paperWinRateTotal));
+  setStatHtml('s-paper-pnl-total', comboPnlHtml(paperPnlToday, paperPnlTotal));
+}
+
 // ─────────────────────────────────────────────────────────
 // Agrupación por par
 // ─────────────────────────────────────────────────────────
@@ -343,6 +424,55 @@ function toggleRealView(checked) {
   showRealTrades = checked;
   renderOpen();
   renderClosed();
+}
+
+function setPaperFinishState(running, message='') {
+  paperFinishRunning = running;
+  const btn = document.getElementById('btn-finish-paper');
+  const status = document.getElementById('paper-finish-status');
+  if (btn) {
+    btn.disabled = running;
+    btn.textContent = running ? 'Finalizando paper...' : 'Fin Paper Trading';
+  }
+  if (status) {
+    status.textContent = message || '';
+  }
+}
+
+async function finishPaperTrading() {
+  if (paperFinishRunning) return;
+  const confirmed = window.confirm(
+    'Esto cerrará todos los trades paper al precio de la última vela cerrada de 5 minutos, generará un resumen YAML y apagará gestiona_trades. ¿Continuar?'
+  );
+  if (!confirmed) return;
+
+  setPaperFinishState(true, 'Cerrando trades paper y generando resumen...');
+  try {
+    const r = await fetch('/api/paper/finish', { method: 'POST' });
+    const contentType = r.headers.get('content-type') || '';
+    const data = contentType.includes('application/json')
+      ? await r.json().catch(() => ({}))
+      : {};
+    if (!r.ok) {
+      let msg = data.error || '';
+      if (!msg && (r.status === 404 || r.status === 405 || r.status === 501)) {
+        msg = 'Fin Paper Trading no está disponible en este arranque. Reinicia gestiona_trades para cargar el backend actualizado.';
+      }
+      if (!msg) {
+        msg = `No se pudo finalizar paper trading (HTTP ${r.status})`;
+      }
+      throw new Error(msg);
+    }
+    const reportPath = data.report_path || 'logs/paper_trading-...-final.yaml';
+    setPaperFinishState(true, `Resumen guardado en ${reportPath}. Apagando gestor...`);
+  } catch (e) {
+    console.error('finishPaperTrading', e);
+    const msg = e.message === 'Failed to fetch'
+      ? 'No se pudo contactar con el backend. Si acabas de actualizar el código, reinicia gestiona_trades y vuelve a intentarlo.'
+      : (e.message || 'Error al finalizar paper trading');
+    setPaperFinishState(false, msg);
+    window.alert(msg);
+  }
 }
 
 function isTradeVisibleBySource(trade) {
@@ -369,6 +499,7 @@ function getProcessedTrades(tradeList) {
         entry_quantity: 0,
         pnl_usdt:       0,
         created_at:     t.created_at,
+        entry_fill_ts:  t.entry_fill_ts || t.created_at,
         exit_fill_ts:   t.exit_fill_ts,
         trade_id:       ''
       };
@@ -379,6 +510,7 @@ function getProcessedTrades(tradeList) {
     g.total_val      += (parseFloat(t.entry_price)    || 0) * (parseFloat(t.entry_quantity) || 0);
     g.pnl_usdt       += (parseFloat(t.pnl_usdt)       || 0);
     if ((t.created_at   || '') > (g.created_at   || '')) g.created_at   = t.created_at;
+    if (((t.entry_fill_ts || t.created_at) || '') > (g.entry_fill_ts || '')) g.entry_fill_ts = t.entry_fill_ts || t.created_at;
     if ((t.exit_fill_ts || '') > (g.exit_fill_ts || '')) g.exit_fill_ts = t.exit_fill_ts;
   });
 
@@ -461,6 +593,9 @@ function renderOpen() {
       const key = sortCol.split('.')[1];
       valA = a.signal_data ? (a.signal_data[key] ?? 0) : 0;
       valB = b.signal_data ? (b.signal_data[key] ?? 0) : 0;
+    } else if (sortCol === 'open_time') {
+      valA = new Date(a.entry_fill_ts || a.created_at || 0).getTime() || 0;
+      valB = new Date(b.entry_fill_ts || b.created_at || 0).getTime() || 0;
     } else {
       valA = a[sortCol] ?? '';
       valB = b[sortCol] ?? '';
@@ -478,7 +613,7 @@ function renderOpen() {
 
   if (!open.length) {
     document.getElementById('tbl-open').innerHTML =
-      '<tr><td class="no-data" colspan="10">Sin trades abiertos</td></tr>';
+      '<tr><td class="no-data" colspan="11">Sin trades abiertos</td></tr>';
     return;
   }
 
@@ -499,6 +634,7 @@ function renderOpen() {
       <td>${badge(t.status)}</td>
       <td>${sizeUsdt !== '—' ? sizeUsdt + ' $' : '—'}</td>
       <td>${fmtPrice(t.entry_price)}</td>
+      <td class="muted">${t.status === 'orphan_binance' ? '—' : fmtDateTime(t.entry_fill_ts || t.created_at)}</td>
       <td>${t.status === 'orphan_binance' ? '—' : `${fmtPrice(t.tp_price)} <span class="muted">(${fmtPrice(t.tp_trigger_price)})</span>`}</td>
       <td>${t.status === 'orphan_binance' ? '—' : `${fmtPrice(t.sl_price)} <span class="muted">(${fmtPrice(t.sl_trigger_price)})</span>`}</td>
       <td class="pnl-est-cell muted">…</td>
@@ -518,7 +654,7 @@ function renderClosed() {
 
   if (!closed.length) {
     document.getElementById('tbl-closed').innerHTML =
-      '<tr><td class="no-data" colspan="12">—</td></tr>';
+      '<tr><td class="no-data" colspan="14">—</td></tr>';
     return;
   }
 
@@ -556,7 +692,9 @@ function renderClosed() {
     <td>${badge(t.status)}</td>
     <td>${sizeUsdt !== '—' ? sizeUsdt + ' $' : '—'}</td>
     <td>${fmtPrice(t.entry_price)}</td>
+    <td class="muted">${fmtDateTime(t.entry_fill_ts || t.created_at)}</td>
     <td>${fmtPrice(t.exit_price)}</td>
+    <td class="muted">${fmtDateTime(t.exit_fill_ts || t.updated_at)}</td>
     <td class="${pnlClass(t.pnl_usdt)}">${fmtUSDT(t.pnl_usdt)}</td>
     <td class="${pnlClass(t.pnl_pct)}">${fmtPct(t.pnl_pct)}</td>
     <td>${exitIcon(t)}</td>
@@ -569,17 +707,21 @@ function renderClosed() {
 }
 
 function renderStats() {
-  const realOpenNow = trades.filter(t =>
-    ['open','opening','signal_received','closing'].includes(t.status) &&
-    (t.source || 'real') === 'real'
-  ).length;
-  setStat('s-open', realOpenNow, realOpenNow > 0 ? 'warn' : '');
+  renderSummaryStats();
   setStat('s-orphans', orphanPositions.length, orphanPositions.length > 0 ? 'warn' : '');
 }
 
 function setStat(id, val, cls='') {
   const el = document.getElementById(id);
+  if (!el) return;
   el.textContent = val;
+  el.className = 'value' + (cls ? ' ' + cls : '');
+}
+
+function setStatHtml(id, html, cls='') {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = html;
   el.className = 'value' + (cls ? ' ' + cls : '');
 }
 
@@ -762,13 +904,9 @@ function handleMessage(msg) {
 }
 
 function updateStatus(data) {
+  latestStatusData = { ...latestStatusData, ...data };
   if (data.ws_binance_connected !== undefined) {
     setDot('dot-ws-binance', data.ws_binance_connected ? 'green' : 'red');
-  }
-  if (data.open_trades_real !== undefined) {
-    setStat('s-open', data.open_trades_real, data.open_trades_real > 0 ? 'warn' : '');
-  } else if (data.open_trades !== undefined) {
-    setStat('s-open', data.open_trades, data.open_trades > 0 ? 'warn' : '');
   }
   if (data.balance_usdt != null) {
     setStat('s-balance', (+data.balance_usdt).toFixed(2) + ' USDT');
@@ -783,22 +921,7 @@ function updateStatus(data) {
     el.textContent = new Date(data.uptime_start).toLocaleString('es-ES',
       { dateStyle: 'short', timeStyle: 'short' });
   }
-  // NUEVO: PnL y Estadísticas desde el backend real
-  if (data.pnl_total_usdt !== undefined) {
-      setStat('s-pnl-total', fmtUSDT(data.pnl_total_usdt) + ' USDT', pnlClass(data.pnl_total_usdt));
-      setStat('s-pnl-day', fmtUSDT(data.pnl_today_usdt) + ' USDT', pnlClass(data.pnl_today_usdt));
-      setStat('s-trades-today', data.trades_today);
-      setStat('s-wr', data.win_rate_pct + '%', data.win_rate_pct >= 50 ? 'pos' : 'neg');
-  }
-  if (data.open_trades_paper !== undefined) {
-      setStat('s-paper-open', data.open_trades_paper, data.open_trades_paper > 0 ? 'warn' : '');
-  }
-  if (data.paper_pnl_total_usdt !== undefined) {
-      setStat('s-paper-pnl-total', fmtUSDT(data.paper_pnl_total_usdt) + ' USDT', pnlClass(data.paper_pnl_total_usdt));
-      setStat('s-paper-pnl-day', fmtUSDT(data.paper_pnl_today_usdt) + ' USDT', pnlClass(data.paper_pnl_today_usdt));
-      setStat('s-paper-trades-today', data.paper_trades_today);
-      setStat('s-paper-wr', data.paper_win_rate_pct + '%', data.paper_win_rate_pct >= 50 ? 'pos' : 'neg');
-  }
+  renderSummaryStats();
   const paperBar = document.getElementById('paper-status-bar');
   if (paperBar && data.paper_trading !== undefined) {
       paperBar.classList.toggle('active', !!data.paper_trading);
@@ -868,6 +991,7 @@ async function fetchConfig() {
     const minChip = document.getElementById('cfg-min-tp-chip');
     if (minChip) minChip.style.display = tpPos ? '' : 'none';
     setEl('cfg-min-tp-posicion', s.Min_TP_posicion != null ? s.Min_TP_posicion + '%' : '—');
+    setEl('cfg-paper-tp-sl-mode', paperTpSlModeText(s.paper_tp_sl_price_mode));
     setEl('cfg-profile', profileMeta.loaded ? 'Activo' : 'No cargado');
     const summary = [];
     if (s.capital_per_trade != null) {
@@ -930,7 +1054,7 @@ async function fetchConfig() {
     if (paperExtraEl) {
       const bits = [];
       if (s.timeout_hours != null) bits.push(`Hold ${s.timeout_hours}h`);
-      bits.push('TP/SL por cierre 5m');
+      bits.push(`TP/SL ${paperTpSlModeText(s.paper_tp_sl_price_mode)}`);
       bits.push('Max abiertos OFF');
       bits.push('Max por par OFF');
       paperExtraEl.textContent = paperTrading ? bits.join(' · ') : '';
