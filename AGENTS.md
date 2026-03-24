@@ -407,10 +407,17 @@ async def run():
 - Idioma de comentarios y mensajes: español.
 - Mantener todos los archivos de texto en UTF-8 limpio y sin mojibake; si aparece texto mal codificado, corregirlo antes de dar la tarea por cerrada.
 - Todas las copias de seguridad, incluidas las de `AGENTS.md` y cualquier otro backup auxiliar, deben guardarse dentro de `./backups/` y no en la raíz del repositorio.
-- Antes de modificar `gestiona_trades.py`, crear siempre una copia de seguridad en `./backups/` con formato `gestiona_trades.YYYYMMDD-HHMMSS.py`.
+- Cada programa o interfaz visible sigue su propia versión independiente.
+- La versión inicial de esta nueva convención puede arrancar en `0.11`.
+- Cada cambio de código en un programa debe incrementar su propia versión en `+0.01`.
+- Flujo obligatorio para cambios de código: 1) identificar la versión actual del componente, 2) crear backup de esa versión en `./backups/`, 3) aplicar el cambio, 4) subir la versión del propio componente en `+0.01` antes de cerrar la tarea.
+- No dejar cambios de código cerrados con una versión antigua o sin actualizar respecto a la modificación realmente hecha.
+- El formato de los backups pasa a ser `nombre.version.tipo` dentro de `./backups/`.
+- Antes de modificar `gestiona_trades.py`, crear siempre una copia de seguridad en `./backups/` con formato `gestiona_trades.<version>.py`.
 - No hacer cambios en `gestiona_trades.py` sin haber creado esa copia previa en la misma sesion de trabajo.
-- Antes de modificar `./static/control_mision.html`, crear siempre una copia de seguridad en `./backups/` con formato `control_mision.YYYYMMDD-HHMMSS.py`.
+- Antes de modificar `./static/control_mision.html`, crear siempre una copia de seguridad en `./backups/` con formato `control_mision.<version>.html`.
 - No hacer cambios en `./static/control_mision.html` sin haber creado esa copia previa en la misma sesion de trabajo.
+- Si se hace backup de documentacion u otros archivos auxiliares, usar el mismo patron: `nombre.<version>.<tipo>`.
 
 ### Convenciones especificas para la integracion con el dashboard
 

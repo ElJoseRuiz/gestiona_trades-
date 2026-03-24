@@ -16,6 +16,7 @@ strategy:
   timeout_hours: 24            # Cerrar si no toca TP/SL en N horas
   solo_cerrando_trades: false  # true = no abre trades nuevos; solo gestiona cierres de los ya abiertos
   paper_trading: false         # true = nuevas señales en paper; el trading real pasa a solo cerrando
+  paper_tp_sl_price_mode: "close_5m"  # "close_5m" = usa el close de la vela 5m; "high_low_5m" = usa low para TP y high para SL
   leverage: 1                  # Apalancamiento (1 = sin apalancamiento)
   min_momentum_pct: 0          # Compat legacy: si hay perfil, momentum_min pisa este valor
   min_vol_ratio: 0             # Compat legacy: si hay perfil, vol_ratio_min pisa este valor

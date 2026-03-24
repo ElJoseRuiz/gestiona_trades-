@@ -35,21 +35,27 @@ import asyncio
 import signal
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
+from statistics import median
 
 # ── Añadir el directorio del paquete al path ──────────────────────────────────
 import os
 sys.path.insert(0, os.path.dirname(__file__))
 
+import yaml
+
 from src.config        import Config
 from src.dashboard     import DashboardServer
 from src.logger        import get_logger, setup_logging
-from src.models        import Event, EventType
+from src.models        import Event, EventType, Trade, TradeStatus
 from src.order_manager import BinanceError, OrderManager
-from src.paper_trade_engine import PaperTradeEngine
+from src.paper_trade_engine import PAPER_TRADE_ENGINE_VERSION, PaperTradeEngine
 from src.signal_watcher import SignalWatcher
 from src.state         import StateDB
 from src.trade_engine  import TradeEngine
 from src.ws_manager    import WSManager
+
+APP_VERSION = "0.20"
 
 log = get_logger("main")
 
@@ -70,6 +76,7 @@ class App:
         self._stop_event = asyncio.Event()
         self._configured_pairs: set[str] = set()
         self._shutdown_started = False
+        self._paper_finish_in_progress = False
 
     # ──────────────────────────────────────────────────────────────────
     # Arranque
@@ -77,6 +84,7 @@ class App:
 
     async def run(self):
         log.info("=" * 60)
+        log.info(f"gestiona_trades v{APP_VERSION} arrancando - modo={self._cfg.mode}")
         if self._cfg.real_trading_solo_cerrando:
             log.warning(
                 "Trading real en modo solo_cerrando_trades=ON: no se abriran "
@@ -190,6 +198,7 @@ class App:
                 cfg               = self._cfg,
                 db                = self._db,
                 get_engine_status = self._engine_status,
+                finish_paper_trading = self._finish_paper_trading,
             )
             if self._cfg.dashboard_enabled:
                 await self._dash.start()
@@ -198,6 +207,7 @@ class App:
             await self._on_event(Event(
                 event_type = EventType.STARTUP.value,
                 details    = {
+                    "version":          APP_VERSION,
                     "mode":             self._cfg.mode,
                     "max_open_trades":  self._cfg.max_open_trades,
                     "capital_per_trade": self._cfg.capital_per_trade,
@@ -264,6 +274,10 @@ class App:
     # ──────────────────────────────────────────────────────────────────
 
     async def _on_signal(self, signal):
+        if self._paper_finish_in_progress:
+            log.info(f"Senal ignorada para {signal.pair}: fin_paper_trading en curso")
+            return
+
         if self._cfg.paper_trading:
             await self._paper_engine.on_signal(signal)
             return
@@ -350,8 +364,8 @@ class App:
         if not self._engine:
             return {"open_trades": 0, "max_open_trades": self._cfg.max_open_trades}
 
-        metrics = await self._db.get_daily_metrics() or {}
-        paper_metrics = await self._db.get_paper_daily_metrics() or {}
+        metrics = await self._db.get_dashboard_summary(paper=False) or {}
+        paper_metrics = await self._db.get_dashboard_summary(paper=True) or {}
         orphan_positions = await self._get_orphan_positions()
         balance_usdt = None
 
@@ -361,30 +375,58 @@ class App:
             except Exception as e:
                 log.warning(f"No se pudo obtener balance para dashboard: {e}")
 
-        total_closed = int(metrics.get("total_closed", 0) or 0)
-        wins = int(metrics.get("wins", 0) or 0)
+        real_open = int(metrics.get("open_total", 0) or 0)
+        real_open_today = int(metrics.get("open_today", 0) or 0)
+        real_entries_total = int(metrics.get("entries_total", 0) or 0)
+        real_entries_today = int(metrics.get("entries_today", 0) or 0)
+        total_closed = int(metrics.get("closed_total", 0) or 0)
+        wins = int(metrics.get("wins_total", 0) or 0)
+        wins_today = int(metrics.get("wins_today", 0) or 0)
+        closed_today_non_manual = int(metrics.get("closed_today_non_manual", 0) or 0)
+        wins_today_non_manual = int(metrics.get("wins_today_non_manual", 0) or 0)
         pnl_today = float(metrics.get("pnl_today", 0.0) or 0.0)
         pnl_total = float(metrics.get("pnl_total", 0.0) or 0.0)
         closed_today = int(metrics.get("closed_today", 0) or 0)
         win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
-        paper_total_closed = int(paper_metrics.get("total_closed", 0) or 0)
-        paper_wins = int(paper_metrics.get("wins", 0) or 0)
+        win_rate_today = (
+            wins_today_non_manual / closed_today_non_manual * 100
+        ) if closed_today_non_manual > 0 else None
+        paper_open = int(paper_metrics.get("open_total", 0) or 0)
+        paper_open_today = int(paper_metrics.get("open_today", 0) or 0)
+        paper_entries_total = int(paper_metrics.get("entries_total", 0) or 0)
+        paper_entries_today = int(paper_metrics.get("entries_today", 0) or 0)
+        paper_total_closed = int(paper_metrics.get("closed_total", 0) or 0)
+        paper_wins = int(paper_metrics.get("wins_total", 0) or 0)
+        paper_wins_today = int(paper_metrics.get("wins_today", 0) or 0)
+        paper_closed_today_non_manual = int(paper_metrics.get("closed_today_non_manual", 0) or 0)
+        paper_wins_today_non_manual = int(paper_metrics.get("wins_today_non_manual", 0) or 0)
         paper_win_rate = (paper_wins / paper_total_closed * 100) if paper_total_closed > 0 else 0
-        paper_open = self._paper_engine.open_count if self._paper_engine else 0
-        real_open = self._engine.open_count
+        paper_win_rate_today = (
+            paper_wins_today_non_manual / paper_closed_today_non_manual * 100
+        ) if paper_closed_today_non_manual > 0 else None
         return {
             "open_trades":      real_open + paper_open,
             "open_trades_real": real_open,
+            "open_trades_today_real": real_open_today,
+            "opened_trades_total_real": real_entries_total,
+            "opened_trades_today_real": real_entries_today,
             "open_trades_paper": paper_open,
+            "open_trades_today_paper": paper_open_today,
+            "opened_trades_total_paper": paper_entries_total,
+            "opened_trades_today_paper": paper_entries_today,
             "max_open_trades":  self._cfg.max_open_trades,
             "mode":             self._cfg.mode,
             "pnl_today_usdt":   round(pnl_today, 4),
             "pnl_total_usdt":   round(pnl_total, 4),
             "trades_today":     closed_today,
+            "trades_total":     total_closed,
+            "win_rate_today_pct": round(win_rate_today, 1) if win_rate_today is not None else None,
             "win_rate_pct":     round(win_rate, 1),
             "paper_pnl_today_usdt": round(float(paper_metrics.get("pnl_today", 0.0) or 0.0), 4),
             "paper_pnl_total_usdt": round(float(paper_metrics.get("pnl_total", 0.0) or 0.0), 4),
             "paper_trades_today": int(paper_metrics.get("closed_today", 0) or 0),
+            "paper_trades_total": paper_total_closed,
+            "paper_win_rate_today_pct": round(paper_win_rate_today, 1) if paper_win_rate_today is not None else None,
             "paper_win_rate_pct": round(paper_win_rate, 1),
             "balance_usdt":     round(balance_usdt, 4) if balance_usdt is not None else None,
             "orphan_positions": orphan_positions,
@@ -394,6 +436,180 @@ class App:
             "ws_connected":     self._ws_mgr._connected if self._ws_mgr else False,
             "ws_binance_connected": self._ws_mgr._connected if self._ws_mgr else False,
         }
+
+    async def _finish_paper_trading(self) -> dict:
+        if self._paper_finish_in_progress:
+            raise RuntimeError("El proceso de fin_paper_trading ya esta en curso.")
+        if not self._paper_engine:
+            raise RuntimeError("PaperTradeEngine no esta disponible.")
+
+        self._paper_finish_in_progress = True
+        try:
+            finish_result = await self._paper_engine.finish_paper_trading()
+            report = await self._build_paper_trading_finish_report(finish_result)
+            report_path = self._write_paper_trading_finish_report(report)
+            asyncio.create_task(self._request_stop_after_paper_finish())
+            return {
+                "status": "ok",
+                "report_path": str(report_path),
+                "closed_open_trades": finish_result.get("closed_open_trades", 0),
+                "cancelled_pending_trades": finish_result.get("cancelled_pending_trades", 0),
+                "finished_at": finish_result.get("requested_at"),
+            }
+        except Exception:
+            self._paper_finish_in_progress = False
+            raise
+
+    async def _request_stop_after_paper_finish(self):
+        await asyncio.sleep(0.5)
+        self.request_stop()
+
+    async def _build_paper_trading_finish_report(self, finish_result: dict) -> dict:
+        session_started_at = finish_result.get("session_started_at")
+        finished_at = finish_result.get("requested_at")
+        session_start_dt = self._parse_iso_dt(session_started_at) or datetime.now(timezone.utc)
+        session_end_dt = self._parse_iso_dt(finished_at) or datetime.now(timezone.utc)
+
+        public_cfg = self._cfg.public_dict()
+        all_history = await self._db.get_all_history_trades()
+        paper_session_trades = [
+            trade for trade in all_history
+            if getattr(trade, "source", "real") == "paper"
+            and self._trade_belongs_to_session(trade, session_start_dt)
+        ]
+        closed_trades = [t for t in paper_session_trades if t.status == TradeStatus.CLOSED]
+        not_executed_trades = [t for t in paper_session_trades if t.status == TradeStatus.NOT_EXECUTED]
+        error_trades = [t for t in paper_session_trades if t.status == TradeStatus.ERROR]
+
+        pnl_pct_values = [float(t.pnl_pct) for t in closed_trades if t.pnl_pct is not None]
+        pnl_usdt_values = [float(t.pnl_usdt) for t in closed_trades if t.pnl_usdt is not None]
+        wins = sum(1 for value in pnl_usdt_values if value > 0)
+        losses = sum(1 for value in pnl_usdt_values if value < 0)
+        flats = sum(1 for value in pnl_usdt_values if value == 0)
+        total_closed = len(closed_trades)
+
+        exit_type_stats: dict[str, dict] = {}
+        pair_stats: dict[str, dict] = {}
+        for trade in closed_trades:
+            exit_key = trade.exit_type or "unknown"
+            exit_bucket = exit_type_stats.setdefault(exit_key, {
+                "count": 0,
+                "wins": 0,
+                "pnl_total_usdt": 0.0,
+                "avg_pnl_pct": [],
+            })
+            exit_bucket["count"] += 1
+            pnl_usdt = float(trade.pnl_usdt or 0.0)
+            pnl_pct = float(trade.pnl_pct or 0.0)
+            exit_bucket["pnl_total_usdt"] += pnl_usdt
+            exit_bucket["avg_pnl_pct"].append(pnl_pct)
+            if pnl_usdt > 0:
+                exit_bucket["wins"] += 1
+
+            pair_bucket = pair_stats.setdefault(trade.pair, {
+                "count": 0,
+                "pnl_total_usdt": 0.0,
+                "avg_pnl_pct": [],
+            })
+            pair_bucket["count"] += 1
+            pair_bucket["pnl_total_usdt"] += pnl_usdt
+            pair_bucket["avg_pnl_pct"].append(pnl_pct)
+
+        exit_type_stats = {
+            key: {
+                "count": value["count"],
+                "win_rate_pct": round(value["wins"] * 100.0 / value["count"], 2) if value["count"] else 0.0,
+                "pnl_total_usdt": round(value["pnl_total_usdt"], 4),
+                "avg_pnl_pct": round(sum(value["avg_pnl_pct"]) / len(value["avg_pnl_pct"]), 4) if value["avg_pnl_pct"] else 0.0,
+            }
+            for key, value in sorted(exit_type_stats.items(), key=lambda item: item[1]["count"], reverse=True)
+        }
+
+        pair_rows = [
+            {
+                "pair": pair,
+                "count": value["count"],
+                "pnl_total_usdt": round(value["pnl_total_usdt"], 4),
+                "avg_pnl_pct": round(sum(value["avg_pnl_pct"]) / len(value["avg_pnl_pct"]), 4) if value["avg_pnl_pct"] else 0.0,
+            }
+            for pair, value in pair_stats.items()
+        ]
+        pair_rows.sort(key=lambda item: item["pnl_total_usdt"])
+
+        duration_hours = (session_end_dt - session_start_dt).total_seconds() / 3600.0
+        return {
+            "paper_trading_summary_version": 1,
+            "inicio_utc": session_started_at,
+            "fin_utc": finished_at,
+            "duracion_horas": round(duration_hours, 4),
+            "motivo_fin": "fin_paper_trading_desde_dashboard",
+            "versiones": {
+                "gestiona_trades": APP_VERSION,
+                "paper_trade_engine": PAPER_TRADE_ENGINE_VERSION,
+            },
+            "parametros_efectivos": {
+                "strategy": public_cfg.get("strategy", {}),
+                "effective_filters_entrada": public_cfg.get("effective_filters_entrada", {}),
+                "filtros_gestiona_trades_meta": public_cfg.get("filtros_gestiona_trades_meta", {}),
+            },
+            "resultado_fin_paper": finish_result,
+            "estadisticas": {
+                "trades_sesion_total": len(paper_session_trades),
+                "trades_cerrados": total_closed,
+                "trades_no_ejecutados": len(not_executed_trades),
+                "trades_error": len(error_trades),
+                "wins": wins,
+                "losses": losses,
+                "flat": flats,
+                "win_rate_pct": round(wins * 100.0 / total_closed, 2) if total_closed else 0.0,
+                "pnl_total_usdt": round(sum(pnl_usdt_values), 4),
+                "pnl_medio_usdt": round(sum(pnl_usdt_values) / total_closed, 4) if total_closed else 0.0,
+                "pnl_medio_pct": round(sum(pnl_pct_values) / total_closed, 4) if total_closed else 0.0,
+                "pnl_mediana_pct": round(median(pnl_pct_values), 4) if pnl_pct_values else 0.0,
+                "mejor_trade_usdt": round(max(pnl_usdt_values), 4) if pnl_usdt_values else 0.0,
+                "peor_trade_usdt": round(min(pnl_usdt_values), 4) if pnl_usdt_values else 0.0,
+                "mejor_trade_pct": round(max(pnl_pct_values), 4) if pnl_pct_values else 0.0,
+                "peor_trade_pct": round(min(pnl_pct_values), 4) if pnl_pct_values else 0.0,
+                "por_tipo_salida": exit_type_stats,
+                "top_5_pares_peores": pair_rows[:5],
+                "top_5_pares_mejores": list(reversed(pair_rows[-5:])),
+            },
+        }
+
+    def _write_paper_trading_finish_report(self, report: dict) -> Path:
+        end_dt = self._parse_iso_dt(report.get("fin_utc")) or datetime.now(timezone.utc)
+        stamp = end_dt.strftime("%Y%m%d-%H%M%S")
+        logs_dir = Path("logs")
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        output_path = logs_dir / f"paper_trading-{stamp}-final.yaml"
+        output_path.write_text(
+            yaml.safe_dump(report, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        log.info(f"Resumen fin_paper_trading guardado en {output_path}")
+        return output_path
+
+    @staticmethod
+    def _parse_iso_dt(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    def _trade_belongs_to_session(self, trade: Trade, session_start_dt: datetime) -> bool:
+        for value in (
+            trade.created_at,
+            trade.updated_at,
+            trade.signal_ts,
+            trade.entry_fill_ts,
+            trade.exit_fill_ts,
+        ):
+            dt = self._parse_iso_dt(value)
+            if dt and dt >= session_start_dt:
+                return True
+        return False
 
     # ──────────────────────────────────────────────────────────────────
     # Parada

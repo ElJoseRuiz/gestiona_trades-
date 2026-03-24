@@ -78,10 +78,12 @@ class DashboardServer:
     def __init__(self,
                  cfg:         Config,
                  db:          StateDB,
-                 get_engine_status: Callable[[], Awaitable[dict]]):
+                 get_engine_status: Callable[[], Awaitable[dict]],
+                 finish_paper_trading: Callable[[], Awaitable[dict]] | None = None):
         self._cfg    = cfg
         self._db     = db
         self._get_engine_status = get_engine_status
+        self._finish_paper_trading = finish_paper_trading
         self._ws_clients: Set[web.WebSocketResponse] = set()
         self._app    = web.Application()
         self._runner = None
@@ -97,6 +99,7 @@ class DashboardServer:
         self._app.router.add_get("/api/events",    self._handle_events)
         self._app.router.add_get("/api/config",    self._handle_config)
         self._app.router.add_post("/api/trades/{id}/close", self._handle_close)
+        self._app.router.add_post("/api/paper/finish", self._handle_finish_paper)
         self._app.router.add_get("/ws",            self._handle_ws)
         self._app.router.add_get("/history",            self._handle_history)
         self._app.router.add_get("/api/history_data",   self._handle_history_data)
@@ -203,6 +206,21 @@ class DashboardServer:
             "trade_id": trade_id,
             "note": "Cierre manual registrado — implementar en trade_engine",
         })
+
+    async def _handle_finish_paper(self, request: web.Request) -> web.Response:
+        if not self._finish_paper_trading:
+            return web.json_response(
+                {"error": "Fin paper trading no disponible en este arranque."},
+                status=501,
+            )
+        try:
+            result = await self._finish_paper_trading()
+            return web.json_response(result)
+        except RuntimeError as e:
+            return web.json_response({"error": str(e)}, status=409)
+        except Exception as e:
+            log.error(f"Error en fin_paper_trading: {e}", exc_info=True)
+            return web.json_response({"error": str(e)}, status=500)
 
     async def _handle_history(self, request: web.Request) -> web.Response:
         html_path = _STATIC_DIR / "history.html"
