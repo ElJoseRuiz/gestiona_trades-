@@ -124,7 +124,7 @@
     <div style="display:flex; align-items: center; gap: 15px;">
       <div class="brand-block">
         <h1>📈 Gestiona Trades</h1>
-        <div class="brand-version">control_mision v0.22</div>
+        <div class="brand-version">control_mision v0.25</div>
       </div>
       <a href="/history" target="_blank" style="font-size:11px; background:#252850; padding:3px 8px; border-radius:4px; border:1px solid #3a3d52; color:#c9cde0;">📊 Ver Analítica Histórica</a>
     </div>
@@ -226,13 +226,45 @@
     <div class="section-title">
       <span>Últimos Trades Cerrados</span>
     </div>
+    <div style="padding:12px 12px 0 12px;">
+      <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;background:#141726;padding:10px 15px;border-radius:8px;border:1px solid #232740;width:max-content;">
+        <label style="font-size:13px;color:#8b8fa8;cursor:pointer;display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" id="group-switch-closed" onchange="toggleGroupView(this.checked)" style="accent-color:#2dc653;width:16px;height:16px;cursor:pointer;">
+          <strong>Agrupar posiciones por Activo (Promediadas)</strong>
+        </label>
+        <label style="font-size:13px;color:#8b8fa8;cursor:pointer;display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" id="show-paper-switch-closed" checked onchange="togglePaperView(this.checked)" style="accent-color:#64b5f6;width:16px;height:16px;cursor:pointer;">
+          <strong>Ver trades paper</strong>
+        </label>
+        <label style="font-size:13px;color:#8b8fa8;cursor:pointer;display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" id="show-real-switch-closed" checked onchange="toggleRealView(this.checked)" style="accent-color:#2dc653;width:16px;height:16px;cursor:pointer;">
+          <strong>Ver trades reales</strong>
+        </label>
+      </div>
+    </div>
     <div class="section-body">
+      <div id="closed-pair-filter-bar" style="display:none;margin-bottom:10px;padding:8px 10px;background:#141726;border:1px solid #232740;border-radius:8px;align-items:center;gap:10px;flex-wrap:wrap;">
+        <span class="muted">Filtrando por par:</span>
+        <strong id="closed-pair-filter-label" style="color:#e0e3f0;">—</strong>
+        <button class="btn" onclick="clearClosedPairFilter()">Ver todos</button>
+      </div>
       <table>
         <thead>
           <tr>
-            <th>Par</th><th>Estado</th><th>Size USDT</th><th>Entry</th><th>Entrada</th><th>Exit</th><th>Salida</th>
-            <th>PnL USDT</th><th>PnL %</th><th>Motivo</th>
-            <th>Duración</th><th>Fees</th><th>Señal top</th><th>Categoría</th>
+            <th style="cursor:pointer" onclick="setSortClosed('pair')" data-sort-closed="pair">Par</th>
+            <th style="cursor:pointer" onclick="setSortClosed('status')" data-sort-closed="status">Estado</th>
+            <th style="cursor:pointer" onclick="setSortClosed('size_usdt')" data-sort-closed="size_usdt">Size USDT</th>
+            <th style="cursor:pointer" onclick="setSortClosed('entry_price')" data-sort-closed="entry_price">Entry</th>
+            <th style="cursor:pointer" onclick="setSortClosed('entry_time')" data-sort-closed="entry_time">Entrada</th>
+            <th style="cursor:pointer" onclick="setSortClosed('exit_price')" data-sort-closed="exit_price">Exit</th>
+            <th style="cursor:pointer" onclick="setSortClosed('exit_time')" data-sort-closed="exit_time">Salida ▼</th>
+            <th style="cursor:pointer" onclick="setSortClosed('pnl_usdt')" data-sort-closed="pnl_usdt">PnL USDT</th>
+            <th style="cursor:pointer" onclick="setSortClosed('pnl_pct')" data-sort-closed="pnl_pct">PnL %</th>
+            <th style="cursor:pointer" onclick="setSortClosed('exit_type')" data-sort-closed="exit_type">Motivo</th>
+            <th style="cursor:pointer" onclick="setSortClosed('duration_ms')" data-sort-closed="duration_ms">Duración</th>
+            <th style="cursor:pointer" onclick="setSortClosed('fees_usdt')" data-sort-closed="fees_usdt">Fees</th>
+            <th style="cursor:pointer" onclick="setSortClosed('signal_data.top')" data-sort-closed="signal_data.top">Señal top</th>
+            <th style="cursor:pointer" onclick="setSortClosed('signal_data.categoria')" data-sort-closed="signal_data.categoria">Categoría</th>
           </tr>
         </thead>
         <tbody id="tbl-closed"><tr><td class="no-data" colspan="14">—</td></tr></tbody>
@@ -252,7 +284,7 @@
   </div>
 
 </div>
-<div class="footer">control_mision v0.22 · actualización en tiempo real vía WebSocket</div>
+<div class="footer">control_mision v0.25 · actualización en tiempo real vía WebSocket</div>
 
 <script>
 // ─────────────────────────────────────────────────────────
@@ -265,6 +297,9 @@ let orphanPositions = [];
 let quarantineHours = 0;
 let sortCol    = 'open_time';
 let sortAsc    = false;
+let sortClosedCol = 'exit_time';
+let sortClosedAsc = false;
+let closedPairFilter = null;
 let isGrouped  = false;
 let showPaperTrades = true;
 let showRealTrades = true;
@@ -410,20 +445,36 @@ function renderSummaryStats() {
 
 function toggleGroupView(checked) {
   isGrouped = checked;
+  syncViewSwitches();
   if (typeof renderOpen   === 'function') renderOpen();
   if (typeof renderClosed === 'function') renderClosed();
 }
 
 function togglePaperView(checked) {
   showPaperTrades = checked;
+  syncViewSwitches();
   renderOpen();
   renderClosed();
 }
 
 function toggleRealView(checked) {
   showRealTrades = checked;
+  syncViewSwitches();
   renderOpen();
   renderClosed();
+}
+
+function syncViewSwitches() {
+  const syncChecked = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.checked = !!value;
+  };
+  syncChecked('group-switch', isGrouped);
+  syncChecked('group-switch-closed', isGrouped);
+  syncChecked('show-paper-switch', showPaperTrades);
+  syncChecked('show-paper-switch-closed', showPaperTrades);
+  syncChecked('show-real-switch', showRealTrades);
+  syncChecked('show-real-switch-closed', showRealTrades);
 }
 
 function setPaperFinishState(running, message='') {
@@ -566,6 +617,33 @@ function setSort(col) {
   renderOpen();
 }
 
+function setSortClosed(col) {
+  if (sortClosedCol === col) {
+    sortClosedAsc = !sortClosedAsc;
+  } else {
+    sortClosedCol = col;
+    sortClosedAsc = true;
+  }
+  document.querySelectorAll('th[data-sort-closed]').forEach(th => {
+    let text = th.innerText.replace(/ ▲| ▼/g, '');
+    if (th.getAttribute('data-sort-closed') === sortClosedCol) {
+      text += sortClosedAsc ? ' ▲' : ' ▼';
+    }
+    th.innerText = text;
+  });
+  renderClosed();
+}
+
+function setClosedPairFilter(pair) {
+  closedPairFilter = pair || null;
+  renderClosed();
+}
+
+function clearClosedPairFilter() {
+  closedPairFilter = null;
+  renderClosed();
+}
+
 // ─────────────────────────────────────────────────────────
 // Render tablas
 // ─────────────────────────────────────────────────────────
@@ -647,14 +725,57 @@ function renderOpen() {
 }
 
 function renderClosed() {
+  const closedFilterBar = document.getElementById('closed-pair-filter-bar');
+  const closedFilterLabel = document.getElementById('closed-pair-filter-label');
+  if (closedFilterBar) {
+    closedFilterBar.style.display = closedPairFilter ? 'flex' : 'none';
+  }
+  if (closedFilterLabel) {
+    closedFilterLabel.textContent = closedPairFilter || '—';
+  }
+
   const closed = getProcessedTrades(
     trades.filter(t => ['closed','not_executed','error'].includes(t.status) && isTradeVisibleBySource(t))
-  ).sort((a,b) => (b.updated_at || b.exit_fill_ts || '').localeCompare(a.updated_at || a.exit_fill_ts || ''))
-   .slice(0, 40);
+  ).filter(t => !closedPairFilter || t.pair === closedPairFilter);
 
-  if (!closed.length) {
+  closed.sort((a, b) => {
+    let valA;
+    let valB;
+    if (sortClosedCol === 'signal_data.top' || sortClosedCol === 'signal_data.categoria') {
+      const key = sortClosedCol.split('.')[1];
+      valA = a.is_grouped ? a.trade_id : (a.signal_data ? (a.signal_data[key] ?? '') : '');
+      valB = b.is_grouped ? b.trade_id : (b.signal_data ? (b.signal_data[key] ?? '') : '');
+    } else if (sortClosedCol === 'entry_time') {
+      valA = new Date(a.entry_fill_ts || a.created_at || 0).getTime() || 0;
+      valB = new Date(b.entry_fill_ts || b.created_at || 0).getTime() || 0;
+    } else if (sortClosedCol === 'exit_time') {
+      valA = new Date(a.exit_fill_ts || a.updated_at || 0).getTime() || 0;
+      valB = new Date(b.exit_fill_ts || b.updated_at || 0).getTime() || 0;
+    } else if (sortClosedCol === 'size_usdt') {
+      valA = (parseFloat(a.entry_price) || 0) * (parseFloat(a.entry_quantity) || 0);
+      valB = (parseFloat(b.entry_price) || 0) * (parseFloat(b.entry_quantity) || 0);
+    } else if (sortClosedCol === 'duration_ms') {
+      valA = new Date(a.exit_fill_ts || a.updated_at || 0).getTime() - new Date(a.entry_fill_ts || a.created_at || 0).getTime();
+      valB = new Date(b.exit_fill_ts || b.updated_at || 0).getTime() - new Date(b.entry_fill_ts || b.created_at || 0).getTime();
+    } else {
+      valA = a[sortClosedCol] ?? '';
+      valB = b[sortClosedCol] ?? '';
+    }
+
+    let cmp = 0;
+    if (!isNaN(parseFloat(valA)) && !isNaN(parseFloat(valB))) {
+      cmp = parseFloat(valA) - parseFloat(valB);
+    } else {
+      cmp = String(valA).localeCompare(String(valB));
+    }
+    return sortClosedAsc ? cmp : -cmp;
+  });
+
+  const closedLimited = closed.slice(0, 40);
+
+  if (!closedLimited.length) {
     document.getElementById('tbl-closed').innerHTML =
-      '<tr><td class="no-data" colspan="14">—</td></tr>';
+      `<tr><td class="no-data" colspan="14">${closedPairFilter ? `Sin trades para ${closedPairFilter}` : '—'}</td></tr>`;
     return;
   }
 
@@ -676,7 +797,7 @@ function renderClosed() {
     });
   }
 
-  document.getElementById('tbl-closed').innerHTML = closed.map(t => {
+  document.getElementById('tbl-closed').innerHTML = closedLimited.map(t => {
     const sizeUsdt = (t.entry_price && t.entry_quantity)
       ? (+t.entry_price * +t.entry_quantity).toFixed(2)
       : '—';
@@ -688,7 +809,7 @@ function renderClosed() {
     }
 
     return `<tr>
-    <td><b>${t.pair}</b>${sourceBadge(t.source)}${t.is_grouped ? ` <span class="muted">(${t.count})</span>` : ''}${quarantineBadge}</td>
+    <td><b>${t.pair}</b> <button class="btn" style="padding:1px 6px;font-size:10px;" title="Ver solo este par en cerrados" onclick="setClosedPairFilter('${String(t.pair).replace(/'/g, "\\'")}')">solo</button>${sourceBadge(t.source)}${t.is_grouped ? ` <span class="muted">(${t.count})</span>` : ''}${quarantineBadge}</td>
     <td>${badge(t.status)}</td>
     <td>${sizeUsdt !== '—' ? sizeUsdt + ' $' : '—'}</td>
     <td>${fmtPrice(t.entry_price)}</td>
@@ -1067,6 +1188,7 @@ async function fetchConfig() {
 // ─────────────────────────────────────────────────────────
 
 (async function init() {
+  syncViewSwitches();
   await fetchTrades();
   await fetchStatus();
   await fetchConfig();
