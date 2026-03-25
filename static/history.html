@@ -3,12 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Analítica Histórica — Gestiona Trades</title>
+<title>Analitica Historica - Gestiona Trades</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:#0d0f1a;color:#c9cde0;font-family:'Consolas','Fira Code',monospace;font-size:13px;padding-bottom:30px}
-  .topbar{background:#141726;border-bottom:1px solid #232740;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;}
+  .topbar{background:#141726;border-bottom:1px solid #232740;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
   .topbar h1{font-size:15px;color:#e0e3f0;letter-spacing:1px}
   .main{padding:16px;display:flex;flex-direction:column;gap:16px}
 
@@ -16,7 +16,8 @@
   .kpi-card{background:#141726;border:1px solid #232740;border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:4px}
   .kpi-label{font-size:10px;color:#6b7294;text-transform:uppercase;letter-spacing:0.5px}
   .kpi-val{font-size:18px;font-weight:bold;color:#e0e3f0}
-  .pos{color:#2dc653} .neg{color:#e63946}
+  .pos{color:#2dc653}
+  .neg{color:#e63946}
 
   .chart-grid{display:grid;grid-template-columns:1fr;gap:16px}
   .chart-row-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
@@ -25,51 +26,59 @@
 
   .badge{padding:3px 8px;border-radius:4px;background:#252850;color:#e0e3f0;text-decoration:none;font-size:11px}
 
-  /* Controles de Filtro */
-  .filter-bar{background:#141726; border:1px solid #232740; padding:10px 16px; border-radius:8px; display:flex; gap:15px; align-items:center; flex-wrap:wrap;}
-  .filter-bar input{background:#0d0f1a; color:#c9cde0; border:1px solid #3a3d52; padding:5px 8px; border-radius:4px; font-family:inherit; color-scheme: dark;}
-  .btn{background:#252850; border:1px solid #3a3d52; color:#c9cde0; padding:5px 12px; border-radius:4px; cursor:pointer; font-family:inherit; transition:0.2s;}
+  .filter-bar{background:#141726;border:1px solid #232740;padding:10px 16px;border-radius:8px;display:flex;gap:15px;align-items:center;flex-wrap:wrap}
+  .filter-bar input,.filter-bar select{background:#0d0f1a;color:#c9cde0;border:1px solid #3a3d52;padding:5px 8px;border-radius:4px;font-family:inherit;color-scheme:dark}
+  .btn{background:#252850;border:1px solid #3a3d52;color:#c9cde0;padding:5px 12px;border-radius:4px;cursor:pointer;font-family:inherit;transition:0.2s}
   .btn:hover{background:#3a3d52}
 
-  /* Botones Toggle Gráfico Principal */
-  .toggle-bar{display:flex; gap:10px; margin-bottom:10px;}
-  .toggle-btn{background:#1a1d2e; border:1px solid #2dc653; color:#2dc653; padding:4px 10px; border-radius:15px; cursor:pointer; font-size:11px; font-weight:bold;}
-  .toggle-btn.off{border-color:#4a4e6a; color:#4a4e6a; background:#141726;}
-  .toggle-btn.dd{border-color:#e63946; color:#e63946;}
-  .toggle-btn.dd.off{border-color:#4a4e6a; color:#4a4e6a;}
-  .toggle-btn.op{border-color:#f4a261; color:#f4a261;}
-  .toggle-btn.op.off{border-color:#4a4e6a; color:#4a4e6a;}
+  .toggle-bar{display:flex;gap:10px;margin-bottom:10px}
+  .toggle-btn{background:#1a1d2e;border:1px solid #2dc653;color:#2dc653;padding:4px 10px;border-radius:15px;cursor:pointer;font-size:11px;font-weight:bold}
+  .toggle-btn.off{border-color:#4a4e6a;color:#4a4e6a;background:#141726}
+  .toggle-btn.dd{border-color:#e63946;color:#e63946}
+  .toggle-btn.dd.off{border-color:#4a4e6a;color:#4a4e6a}
+  .toggle-btn.op{border-color:#f4a261;color:#f4a261}
+  .toggle-btn.op.off{border-color:#4a4e6a;color:#4a4e6a}
 </style>
 </head>
 <body>
 
 <div class="topbar">
-  <h1>📊 Analítica Histórica (Backtest Real)</h1>
-  <a href="/" class="badge">← Volver al Live Dashboard</a>
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+    <h1 id="history-title">Analitica Historica (Real)</h1>
+    <span class="badge" style="opacity:0.85;">history v0.12</span>
+  </div>
+  <a href="/" class="badge">&larr; Volver al Live Dashboard</a>
 </div>
 
 <div class="main">
   <div class="filter-bar">
-    <div style="font-weight:bold; color:#8b8fa8; font-size:11px; text-transform:uppercase;">Filtro de Rango:</div>
+    <div style="font-weight:bold;color:#8b8fa8;font-size:11px;text-transform:uppercase;">Filtro de rango:</div>
     <label style="font-size:12px;">Desde: <input type="date" id="startDate"></label>
     <label style="font-size:12px;">Hasta: <input type="date" id="endDate"></label>
+    <label style="font-size:12px;">Fuente:
+      <select id="sourceMode" onchange="applyFilters()">
+        <option value="real" selected>Real</option>
+        <option value="paper">Paper</option>
+        <option value="both">Ambos</option>
+      </select>
+    </label>
     <button class="btn" onclick="applyFilters()">Aplicar Filtro</button>
     <button class="btn" onclick="resetFilters()">Reset Global</button>
   </div>
 
   <div class="kpi-grid">
-    <div class="kpi-card"><span class="kpi-label">Total Trades</span><span class="kpi-val" id="kpi-trades">—</span></div>
-    <div class="kpi-card"><span class="kpi-label">Win Rate</span><span class="kpi-val" id="kpi-wr">—</span></div>
-    <div class="kpi-card"><span class="kpi-label">Avg Trade</span><span class="kpi-val" id="kpi-avg">—</span></div>
-    <div class="kpi-card"><span class="kpi-label">Net Profit</span><span class="kpi-val" id="kpi-pnl">—</span></div>
-    <div class="kpi-card"><span class="kpi-label">Max DD Equity</span><span class="kpi-val neg" id="kpi-dd">—</span></div>
-    <div class="kpi-card"><span class="kpi-label">Profit Factor</span><span class="kpi-val" id="kpi-pf">—</span></div>
-    <div class="kpi-card"><span class="kpi-label">Calmar Ratio</span><span class="kpi-val" id="kpi-calmar">—</span></div>
+    <div class="kpi-card"><span class="kpi-label">Total Trades</span><span class="kpi-val" id="kpi-trades">0</span></div>
+    <div class="kpi-card"><span class="kpi-label">Win Rate</span><span class="kpi-val" id="kpi-wr">&mdash;</span></div>
+    <div class="kpi-card"><span class="kpi-label">Avg Trade</span><span class="kpi-val" id="kpi-avg">&mdash;</span></div>
+    <div class="kpi-card"><span class="kpi-label">Net Profit</span><span class="kpi-val" id="kpi-pnl">0.00 USDT</span></div>
+    <div class="kpi-card"><span class="kpi-label">Max DD Equity</span><span class="kpi-val neg" id="kpi-dd">0.00 USDT</span></div>
+    <div class="kpi-card"><span class="kpi-label">Profit Factor</span><span class="kpi-val" id="kpi-pf">&mdash;</span></div>
+    <div class="kpi-card"><span class="kpi-label">Calmar Ratio</span><span class="kpi-val" id="kpi-calmar">&mdash;</span></div>
   </div>
 
   <div class="chart-grid">
-    <div class="chart-container" style="height: 420px; padding-top:40px;">
-      <div class="toggle-bar" style="position:absolute; top:12px; left:12px; z-index:10;">
+    <div class="chart-container" style="height:420px;padding-top:40px;">
+      <div class="toggle-bar" style="position:absolute;top:12px;left:12px;z-index:10;">
         <button id="btn-rend" class="toggle-btn" onclick="toggleDataset(0, 'btn-rend')">Curva Rendimiento (ON)</button>
         <button id="btn-dd" class="toggle-btn dd" onclick="toggleDataset(1, 'btn-dd')">Drawdown (ON)</button>
         <button id="btn-op" class="toggle-btn op" onclick="toggleDataset(2, 'btn-op')">Trades Abiertos (ON)</button>
@@ -96,37 +105,74 @@ Chart.defaults.borderColor = '#232740';
 let allTrades = [];
 let chartInstances = {};
 
-function pnlClass(v) { return v >= 0 ? 'pos' : 'neg'; }
+function pnlClass(v) {
+  return v >= 0 ? 'pos' : 'neg';
+}
+
+function getSourceMode() {
+  return document.getElementById('sourceMode')?.value || 'real';
+}
+
+function sourceLabel(mode) {
+  if (mode === 'paper') return 'Paper';
+  if (mode === 'both') return 'Real + Paper';
+  return 'Real';
+}
+
+function updateHistoryHeader(mode) {
+  const label = sourceLabel(mode);
+  const titleEl = document.getElementById('history-title');
+  if (titleEl) titleEl.textContent = `Analitica Historica (${label})`;
+  document.title = `Analitica Historica (${label}) - Gestiona Trades`;
+}
+
+function resetKpis() {
+  document.getElementById('kpi-trades').textContent = '0';
+  document.getElementById('kpi-wr').textContent = '—';
+  document.getElementById('kpi-wr').className = 'kpi-val';
+  document.getElementById('kpi-avg').textContent = '—';
+  document.getElementById('kpi-pnl').textContent = '0.00 USDT';
+  document.getElementById('kpi-pnl').className = 'kpi-val';
+  document.getElementById('kpi-dd').textContent = '0.00 USDT';
+  document.getElementById('kpi-pf').textContent = '—';
+  document.getElementById('kpi-calmar').textContent = '—';
+}
 
 async function init() {
   try {
     const res = await fetch('/api/history_data');
     allTrades = await res.json();
-    if (!allTrades.length) return;
-
+    updateHistoryHeader(getSourceMode());
     processData(allTrades);
-  } catch (e) { console.error("Error loading history", e); }
+  } catch (e) {
+    console.error('Error loading history', e);
+  }
 }
 
 function applyFilters() {
   const start = document.getElementById('startDate').value;
   const end = document.getElementById('endDate').value;
+  const sourceMode = getSourceMode();
 
   let filtered = allTrades;
+
+  if (sourceMode !== 'both') {
+    filtered = filtered.filter(t => (t.source || 'real') === sourceMode);
+  }
 
   if (start) {
     const startTs = new Date(start).getTime();
     filtered = filtered.filter(t => {
-        if (t.status === 'closed') return new Date(t.exit_fill_ts).getTime() >= startTs;
-        return true; // Conservar trades abiertos en contexto visual
+      if (t.status === 'closed') return new Date(t.exit_fill_ts).getTime() >= startTs;
+      return true;
     });
   }
 
   if (end) {
     const endTs = new Date(end).getTime() + 86400000;
     filtered = filtered.filter(t => {
-        if (t.status === 'closed') return new Date(t.exit_fill_ts).getTime() <= endTs;
-        return new Date(t.entry_fill_ts || t.created_at).getTime() <= endTs;
+      if (t.status === 'closed') return new Date(t.exit_fill_ts).getTime() <= endTs;
+      return new Date(t.entry_fill_ts || t.created_at).getTime() <= endTs;
     });
   }
 
@@ -136,11 +182,12 @@ function applyFilters() {
 function resetFilters() {
   document.getElementById('startDate').value = '';
   document.getElementById('endDate').value = '';
+  document.getElementById('sourceMode').value = 'real';
   processData(allTrades);
 }
 
 function toggleDataset(index, btnId) {
-  const chart = chartInstances['equityChart'];
+  const chart = chartInstances.equityChart;
   if (!chart) return;
 
   const meta = chart.getDatasetMeta(index);
@@ -160,67 +207,88 @@ function toggleDataset(index, btnId) {
 function processData(filteredTrades) {
   Object.values(chartInstances).forEach(chart => chart.destroy());
   chartInstances = {};
+  updateHistoryHeader(getSourceMode());
+  resetKpis();
 
-  // Aislar trades cerrados para el eje X cronológico
   const closedTrades = filteredTrades
     .filter(t => t.status === 'closed')
-    .sort((a,b) => (a.exit_fill_ts || '').localeCompare(b.exit_fill_ts || ''));
+    .sort((a, b) => (a.exit_fill_ts || '').localeCompare(b.exit_fill_ts || ''));
 
-  let cumPnl = 0, peak = 0, maxDd = 0, wins = 0, grossProfit = 0, grossLoss = 0;
-  const labels = [], equityData = [], ddData = [], openTradesData = [];
+  let cumPnl = 0;
+  let peak = 0;
+  let maxDd = 0;
+  let wins = 0;
+  let grossProfit = 0;
+  let grossLoss = 0;
 
-  const byQuintile = {}, byPair = {}, byCategory = {};
-  const byMomentum = { '0-2%':0, '2-3%':0, '3-4%':0, '4-5%':0, '5-10%':0, '10-15%':0, '>15%':0 };
+  const labels = [];
+  const equityData = [];
+  const ddData = [];
+  const openTradesData = [];
 
-  // Calculadora de concurrencia usando toda la matriz de datos
+  const byQuintile = {};
+  const byPair = {};
+  const byCategory = {};
+  const byMomentum = {
+    '0-2%': 0,
+    '2-3%': 0,
+    '3-4%': 0,
+    '4-5%': 0,
+    '5-10%': 0,
+    '10-15%': 0,
+    '>15%': 0,
+  };
+
   const getOpenTradesAt = (timestampStr) => {
-      const currentTs = new Date(timestampStr).getTime();
-      let count = 0;
-      for (let i=0; i<filteredTrades.length; i++) {
-          const t = filteredTrades[i];
-          if (['error', 'not_executed'].includes(t.status)) continue;
+    const currentTs = new Date(timestampStr).getTime();
+    let count = 0;
 
-          const entryTs = new Date(t.entry_fill_ts || t.created_at).getTime();
-          if (entryTs > currentTs) continue; // Abierto después de este punto
+    for (const t of filteredTrades) {
+      if (['error', 'not_executed'].includes(t.status)) continue;
 
-          if (t.status === 'closed' && t.exit_fill_ts) {
-              const exitTs = new Date(t.exit_fill_ts).getTime();
-              // Es estrictamente <= para capturar el instante del cierre
-              if (currentTs <= exitTs) count++;
-          } else {
-              // Sigue abierto
-              count++;
-          }
+      const entryTs = new Date(t.entry_fill_ts || t.created_at).getTime();
+      if (entryTs > currentTs) continue;
+
+      if (t.status === 'closed' && t.exit_fill_ts) {
+        const exitTs = new Date(t.exit_fill_ts).getTime();
+        if (currentTs <= exitTs) count++;
+      } else {
+        count++;
       }
-      return count;
+    }
+
+    return count;
   };
 
   closedTrades.forEach((t, i) => {
-    const pnl = t.pnl_usdt || 0;
+    const pnl = Number(t.pnl_usdt || 0);
     cumPnl += pnl;
 
-    if (pnl > 0) { wins++; grossProfit += pnl; }
-    else { grossLoss += Math.abs(pnl); }
+    if (pnl > 0) {
+      wins++;
+      grossProfit += pnl;
+    } else {
+      grossLoss += Math.abs(pnl);
+    }
 
     if (cumPnl > peak) peak = cumPnl;
     const currentDd = cumPnl - peak;
     if (currentDd < maxDd) maxDd = currentDd;
 
-    labels.push(t.exit_fill_ts ? t.exit_fill_ts.substring(5,16).replace('T', ' ') : `T#${i}`);
+    labels.push(t.exit_fill_ts ? t.exit_fill_ts.substring(5, 16).replace('T', ' ') : `T#${i}`);
     equityData.push(cumPnl);
     ddData.push(currentDd);
     openTradesData.push(t.exit_fill_ts ? getOpenTradesAt(t.exit_fill_ts) : 0);
 
-    // Agregaciones
-    const q = t.signal_data?.quintil || 'N/A';
-    byQuintile[`Q${q}`] = (byQuintile[`Q${q}`] || 0) + pnl;
+    const quintile = t.signal_data?.quintil ?? 'N/A';
+    byQuintile[`Q${quintile}`] = (byQuintile[`Q${quintile}`] || 0) + pnl;
 
-    const cat = t.signal_data?.cat || 'Otros';
-    byCategory[cat] = (byCategory[cat] || 0) + pnl;
+    const category = t.signal_data?.categoria || t.signal_data?.cat || 'Otros';
+    byCategory[category] = (byCategory[category] || 0) + pnl;
 
     byPair[t.pair] = (byPair[t.pair] || 0) + pnl;
 
-    const mom = t.signal_data?.mom_1h_pct || 0;
+    const mom = Number(t.signal_data?.mom_1h_pct || 0);
     if (mom > 15) byMomentum['>15%'] += pnl;
     else if (mom > 10) byMomentum['10-15%'] += pnl;
     else if (mom > 5) byMomentum['5-10%'] += pnl;
@@ -230,42 +298,36 @@ function processData(filteredTrades) {
     else byMomentum['0-2%'] += pnl;
   });
 
-  // Punto Sintético "AHORA"
   let currentLiveOpen = 0;
   filteredTrades.forEach(t => {
-      if (!['closed', 'error', 'not_executed'].includes(t.status)) currentLiveOpen++;
+    if (!['closed', 'error', 'not_executed'].includes(t.status)) currentLiveOpen++;
   });
 
   if (closedTrades.length > 0) {
-      labels.push('AHORA');
-      equityData.push(cumPnl);
-      ddData.push(maxDd);
-      openTradesData.push(currentLiveOpen);
+    labels.push('AHORA');
+    equityData.push(cumPnl);
+    ddData.push(maxDd);
+    openTradesData.push(currentLiveOpen);
   }
 
-  // Matemáticas Finales basadas en Operaciones Finalizadas
   const pf = grossLoss > 0 ? (grossProfit / grossLoss) : grossProfit;
   const wr = closedTrades.length > 0 ? (wins / closedTrades.length) * 100 : 0;
-  const avg = closedTrades.length > 0 ? cumPnl / closedTrades.length : 0;
+  const avg = closedTrades.length > 0 ? (cumPnl / closedTrades.length) : 0;
   const calmar = maxDd !== 0 ? Math.abs(cumPnl / maxDd) : (cumPnl > 0 ? 99.99 : 0);
 
-  // Render KPIs
-  document.getElementById('kpi-trades').textContent = closedTrades.length;
-  document.getElementById('kpi-wr').textContent = wr.toFixed(1) + '%';
+  document.getElementById('kpi-trades').textContent = String(closedTrades.length);
+  document.getElementById('kpi-wr').textContent = `${wr.toFixed(1)}%`;
   document.getElementById('kpi-wr').className = 'kpi-val ' + (wr >= 50 ? 'pos' : 'neg');
-  document.getElementById('kpi-avg').textContent = avg.toFixed(2) + ' USDT';
-
-  document.getElementById('kpi-pnl').textContent = cumPnl.toFixed(2) + ' USDT';
+  document.getElementById('kpi-avg').textContent = `${avg.toFixed(2)} USDT`;
+  document.getElementById('kpi-pnl').textContent = `${cumPnl.toFixed(2)} USDT`;
   document.getElementById('kpi-pnl').className = 'kpi-val ' + pnlClass(cumPnl);
-  document.getElementById('kpi-dd').textContent = maxDd.toFixed(2) + ' USDT';
+  document.getElementById('kpi-dd').textContent = `${maxDd.toFixed(2)} USDT`;
+  document.getElementById('kpi-pf').textContent = closedTrades.length > 0 ? pf.toFixed(2) : '—';
+  document.getElementById('kpi-calmar').textContent = closedTrades.length > 0 ? calmar.toFixed(2) : '—';
 
-  document.getElementById('kpi-pf').textContent = pf.toFixed(2);
-  document.getElementById('kpi-calmar').textContent = calmar.toFixed(2);
+  if (closedTrades.length === 0) return;
 
-  if(closedTrades.length === 0) return;
-
-  // Gráfico Principal
-  chartInstances['equityChart'] = new Chart(document.getElementById('equityChart'), {
+  chartInstances.equityChart = new Chart(document.getElementById('equityChart'), {
     type: 'line',
     data: {
       labels: labels,
@@ -277,14 +339,14 @@ function processData(filteredTrades) {
           backgroundColor: '#2dc65320',
           fill: true,
           tension: 0.1,
-          yAxisID: 'y'
+          yAxisID: 'y',
         },
         {
           label: 'Drawdown',
           data: ddData,
           type: 'bar',
           backgroundColor: '#e6394680',
-          yAxisID: 'y1'
+          yAxisID: 'y1',
         },
         {
           label: 'Trades Abiertos',
@@ -295,26 +357,27 @@ function processData(filteredTrades) {
           borderWidth: 1.5,
           tension: 0.2,
           yAxisID: 'y2',
-          pointRadius: 0
-        }
-      ]
+          pointRadius: 0,
+        },
+      ],
     },
     options: {
-      responsive: true, maintainAspectRatio: false,
+      responsive: true,
+      maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: { title: { display: false }, legend: { display: false } },
       scales: {
-        y:  { position: 'left',  grid: {color: '#232740'}, title: {display:true, text:'PnL (USDT)', color:'#6b7294'} },
-        y1: { position: 'right', max: 0, grid: {display: false}, title: {display:true, text:'DD (USDT)', color:'#6b7294'} },
-        y2: { position: 'right', min: 0, grid: {display: false}, title: {display:true, text:'Concurrencia', color:'#f4a261'} }
-      }
-    }
+        y:  { position: 'left', grid: { color: '#232740' }, title: { display: true, text: 'PnL (USDT)', color: '#6b7294' } },
+        y1: { position: 'right', max: 0, grid: { display: false }, title: { display: true, text: 'DD (USDT)', color: '#6b7294' } },
+        y2: { position: 'right', min: 0, grid: { display: false }, title: { display: true, text: 'Concurrencia', color: '#f4a261' } },
+      },
+    },
   });
 
   const createBarChart = (ctxId, title, dataObj) => {
     let keys = Object.keys(dataObj);
-    if(ctxId === 'momentumChart') {
-        keys = ['0-2%', '2-3%', '3-4%', '4-5%', '5-10%', '10-15%', '>15%'];
+    if (ctxId === 'momentumChart') {
+      keys = ['0-2%', '2-3%', '3-4%', '4-5%', '5-10%', '10-15%', '>15%'];
     }
     const vals = keys.map(k => dataObj[k] || 0);
     const bgColors = vals.map(v => v >= 0 ? '#2dc65380' : '#e6394680');
@@ -324,22 +387,27 @@ function processData(filteredTrades) {
       type: 'bar',
       data: {
         labels: keys,
-        datasets: [{ label: 'PnL USDT', data: vals, backgroundColor: bgColors, borderColor: borderColors, borderWidth: 1 }]
+        datasets: [{ label: 'PnL USDT', data: vals, backgroundColor: bgColors, borderColor: borderColors, borderWidth: 1 }],
       },
       options: {
-        responsive: true, maintainAspectRatio: false,
-        plugins: { title: { display: true, text: title, color: '#e0e3f0' }, legend: {display: false} },
-        scales: { y: { grid: {color: '#232740'} } }
-      }
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { title: { display: true, text: title, color: '#e0e3f0' }, legend: { display: false } },
+        scales: { y: { grid: { color: '#232740' } } },
+      },
     });
   };
 
+  const sortObj = (obj) => Object.entries(obj)
+    .sort((a, b) => b[1] - a[1])
+    .reduce((res, [k, v]) => {
+      res[k] = v;
+      return res;
+    }, {});
+
   createBarChart('quintileChart', 'Rendimiento por Quintil', byQuintile);
   createBarChart('momentumChart', 'Rendimiento por Rango de Momentum (1h)', byMomentum);
-
-  const sortObj = (obj) => Object.entries(obj).sort((a,b) => b[1] - a[1]).reduce((res, [k,v]) => { res[k] = v; return res; }, {});
-
-  createBarChart('categoryChart', 'Rendimiento Neto por Categoría', sortObj(byCategory));
+  createBarChart('categoryChart', 'Rendimiento Neto por Categoria', sortObj(byCategory));
   createBarChart('pairChart', 'Rendimiento Neto por Activo', sortObj(byPair));
 }
 
