@@ -2,7 +2,9 @@
 paper_trade_engine.py - Motor de paper trading sin ejecucion real en Binance.
 
 - Las entradas se abren al precio de mercado del momento.
-- Los cierres por TP/SL se evalúan con el cierre de la última vela cerrada de 5m.
+- Los cierres por TP/SL se evalúan con la última vela cerrada de 5m.
+- close_5m: detecta y ejecuta al close de la vela.
+- high_low_5m: detecta por intravela (low para TP, high para SL) y ejecuta al trigger.
 - Los cierres por hold usan el precio de mercado del momento.
 - Toda la persistencia va a la tabla paper_trades.
 """
@@ -22,7 +24,7 @@ from .state import StateDB
 log = get_logger("paper_trade_engine")
 
 OnEventCallback = Callable[[Event], Awaitable[None]]
-PAPER_TRADE_ENGINE_VERSION = "0.19"
+PAPER_TRADE_ENGINE_VERSION = "0.22"
 _PAPER_KLINE_INTERVAL_S = 300
 _PAPER_KLINE_GRACE_S = 10
 _KLINE_WARNING_INTERVAL_S = 300.0
@@ -73,6 +75,13 @@ class PaperTradeEngine:
         ]
 
     async def restore(self, trades: list[Trade]):
+        if self._cfg.paper_trading:
+            synced = await self._db.sync_paper_closed_trade_fees(self._cfg.paper_friction_pct)
+            if synced:
+                log.info(
+                    f"Paper: fees históricas resincronizadas con friction_pct="
+                    f"{self._cfg.paper_friction_pct:.4f}% ({synced} trades)"
+                )
         self._trades = {}
         for trade in trades:
             trade.source = "paper"
@@ -86,7 +95,10 @@ class PaperTradeEngine:
             self._session_started_at = datetime.now(timezone.utc).isoformat()
         self._timeout_task = asyncio.create_task(self._timeout_loop(), name="paper_timeout_checker")
         self._candle_task = asyncio.create_task(self._candle_loop(), name="paper_candle_checker")
-        log.info(f"PaperTradeEngine v{PAPER_TRADE_ENGINE_VERSION} iniciado")
+        log.info(
+            f"PaperTradeEngine v{PAPER_TRADE_ENGINE_VERSION} iniciado "
+            f"(friction_pct={self._cfg.paper_friction_pct:.4f}%)"
+        )
 
     async def stop(self):
         for task in (self._timeout_task, self._candle_task):
@@ -397,10 +409,10 @@ class PaperTradeEngine:
                 sl_check_price=price_ctx["sl_check_price"],
             )
             if trigger_trade and trigger_type:
-                exit_price = (
-                    price_ctx["tp_exit_price"]
-                    if trigger_type == ExitType.TP.value
-                    else price_ctx["sl_exit_price"]
+                exit_price = self._resolve_paper_exit_price(
+                    trigger_trade,
+                    trigger_type,
+                    price_ctx,
                 )
                 await self._close_trade_by_signal(
                     trigger_trade,
@@ -457,8 +469,8 @@ class PaperTradeEngine:
             return {
                 "tp_check_price": float(kline["low"]),
                 "sl_check_price": float(kline["high"]),
-                "tp_exit_price": float(kline["low"]),
-                "sl_exit_price": float(kline["high"]),
+                "tp_exit_price": close_price,
+                "sl_exit_price": close_price,
                 "price_source": "kline_5m_high_low",
             }
 
@@ -469,6 +481,21 @@ class PaperTradeEngine:
             "sl_exit_price": close_price,
             "price_source": "kline_5m_close",
         }
+
+    def _resolve_paper_exit_price(self,
+                                  trade: Trade,
+                                  trigger_type: str,
+                                  price_ctx: dict[str, float | str]) -> float:
+        if trigger_type == ExitType.TP.value:
+            trigger_price = float(trade.tp_trigger_price or 0.0)
+            fallback_price = float(price_ctx["tp_exit_price"])
+        else:
+            trigger_price = float(trade.sl_trigger_price or 0.0)
+            fallback_price = float(price_ctx["sl_exit_price"])
+
+        if self._cfg.paper_tp_sl_price_mode == "high_low_5m" and trigger_price > 0:
+            return trigger_price
+        return fallback_price
 
     def _log_kline_fetch_failure(self, pair: str, error: Exception):
         now = time.monotonic()
@@ -510,8 +537,14 @@ class PaperTradeEngine:
         await self._db.save_paper_trade(trade)
 
         event_type = EventType.TP_FILL if exit_type == ExitType.TP.value else EventType.SL_FILL
+        trigger_price = (
+            float(trade.tp_trigger_price or 0.0)
+            if exit_type == ExitType.TP.value
+            else float(trade.sl_trigger_price or 0.0)
+        )
         await self._emit(event_type, trade.trade_id, {
             "price": exit_price,
+            "triggerPrice": trigger_price if trigger_price > 0 else None,
             "paper": True,
             "candle_5m": True,
             "price_source": price_source,
@@ -687,9 +720,12 @@ class PaperTradeEngine:
         if trade.entry_price and trade.exit_price and trade.entry_quantity:
             pnl_pct = ((trade.entry_price - trade.exit_price) / trade.entry_price * 100)
             pnl_usdt = (trade.entry_price - trade.exit_price) * trade.entry_quantity
+            # Igual que en real, guardamos el PnL bruto y las fees por separado.
+            friction_rate = self._cfg.paper_friction_pct / 100.0
+            fees_usdt = (trade.entry_price + trade.exit_price) * trade.entry_quantity * friction_rate
             trade.pnl_pct = round(pnl_pct, 4)
             trade.pnl_usdt = round(pnl_usdt, 4)
-            trade.fees_usdt = 0.0
+            trade.fees_usdt = round(fees_usdt, 4)
 
         trade.status = TradeStatus.CLOSED
         trade.touch()

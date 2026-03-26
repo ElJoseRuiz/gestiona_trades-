@@ -124,7 +124,7 @@
     <div style="display:flex; align-items: center; gap: 15px;">
       <div class="brand-block">
         <h1>📈 Gestiona Trades</h1>
-        <div class="brand-version">control_mision v0.25</div>
+        <div class="brand-version">control_mision v0.30</div>
       </div>
       <a href="/history" target="_blank" style="font-size:11px; background:#252850; padding:3px 8px; border-radius:4px; border:1px solid #3a3d52; color:#c9cde0;">📊 Ver Analítica Histórica</a>
     </div>
@@ -175,6 +175,7 @@
     <div class="stat-chip"><span class="label">Paper Win Rate (hoy-total)</span><span class="value" id="s-paper-wr">—</span></div>
     <div class="stat-chip"><span class="label">Paper PnL (hoy-total)</span><span class="value" id="s-paper-pnl-total">—</span></div>
     <div class="stat-chip cfg-chip"><span class="label">Paper TP/SL</span><span class="value" id="cfg-paper-tp-sl-mode" style="font-size:13px">—</span></div>
+    <div class="stat-chip cfg-chip"><span class="label">Paper fricción</span><span class="value" id="cfg-paper-friction" style="font-size:13px">—</span></div>
   </div>
 
   <!-- Switch agrupación -->
@@ -200,6 +201,11 @@
       <span id="open-count" class="muted">0</span>
     </div>
     <div class="section-body">
+      <div id="open-pair-filter-bar" style="display:none;margin-bottom:10px;padding:8px 10px;background:#141726;border:1px solid #232740;border-radius:8px;align-items:center;gap:10px;flex-wrap:wrap;">
+        <span class="muted">Filtrando por par:</span>
+        <strong id="open-pair-filter-label" style="color:#e0e3f0;">—</strong>
+        <button class="btn" onclick="clearOpenPairFilter()">Ver todos</button>
+      </div>
       <table>
         <thead>
           <tr>
@@ -239,6 +245,10 @@
         <label style="font-size:13px;color:#8b8fa8;cursor:pointer;display:flex;align-items:center;gap:8px;">
           <input type="checkbox" id="show-real-switch-closed" checked onchange="toggleRealView(this.checked)" style="accent-color:#2dc653;width:16px;height:16px;cursor:pointer;">
           <strong>Ver trades reales</strong>
+        </label>
+        <label style="font-size:13px;color:#8b8fa8;cursor:pointer;display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" id="show-only-sl-switch-closed" onchange="toggleClosedSlOnly(this.checked)" style="accent-color:#e63946;width:16px;height:16px;cursor:pointer;">
+          <strong>Ver solo SLs</strong>
         </label>
       </div>
     </div>
@@ -284,7 +294,7 @@
   </div>
 
 </div>
-<div class="footer">control_mision v0.25 · actualización en tiempo real vía WebSocket</div>
+<div class="footer">control_mision v0.30 · actualización en tiempo real vía WebSocket</div>
 
 <script>
 // ─────────────────────────────────────────────────────────
@@ -299,7 +309,9 @@ let sortCol    = 'open_time';
 let sortAsc    = false;
 let sortClosedCol = 'exit_time';
 let sortClosedAsc = false;
+let openPairFilter = null;
 let closedPairFilter = null;
+let showOnlyClosedSL = false;
 let isGrouped  = false;
 let showPaperTrades = true;
 let showRealTrades = true;
@@ -318,6 +330,35 @@ const fmtUSDT   = v => v != null ? (v >= 0 ? '+' : '') + (+v).toFixed(4) : '—'
 const fmtFees   = v => v != null ? (+v).toFixed(4) : '—';
 
 function pnlClass(v) { return v == null ? '' : v >= 0 ? 'pos' : 'neg'; }
+
+function tradeIsPaper(t) {
+  return (t?.source || 'real') === 'paper';
+}
+
+function tradeGrossPnlUsdt(t) {
+  return Number(t?.pnl_usdt || 0);
+}
+
+function tradeFeesUsdt(t) {
+  return Number(t?.fees_usdt || 0);
+}
+
+function tradeNetPnlUsdt(t) {
+  return tradeIsPaper(t) ? (tradeGrossPnlUsdt(t) - tradeFeesUsdt(t)) : tradeGrossPnlUsdt(t);
+}
+
+function tradeSizeUsdt(t) {
+  return Number(t?.entry_price || 0) * Number(t?.entry_quantity || 0);
+}
+
+function tradeNetPnlPct(t) {
+  const sizeUsdt = tradeSizeUsdt(t);
+  if (sizeUsdt > 0) {
+    return (tradeNetPnlUsdt(t) / sizeUsdt) * 100;
+  }
+  const rawPct = t?.pnl_pct;
+  return rawPct != null ? Number(rawPct) : null;
+}
 
 function badge(status) {
   const labels = {
@@ -396,7 +437,7 @@ function comboCountText(todayVal, totalVal) {
 
 function valuePartHtml(text, rawValue) {
   const num = Number(rawValue);
-  const cls = Number.isFinite(num) && num < 0 ? 'neg' : '';
+  const cls = Number.isFinite(num) ? (num >= 0 ? 'pos' : 'neg') : '';
   return `<span${cls ? ` class="${cls}"` : ''}>${text}</span>`;
 }
 
@@ -464,6 +505,11 @@ function toggleRealView(checked) {
   renderClosed();
 }
 
+function toggleClosedSlOnly(checked) {
+  showOnlyClosedSL = checked;
+  renderClosed();
+}
+
 function syncViewSwitches() {
   const syncChecked = (id, value) => {
     const el = document.getElementById(id);
@@ -475,6 +521,7 @@ function syncViewSwitches() {
   syncChecked('show-paper-switch-closed', showPaperTrades);
   syncChecked('show-real-switch', showRealTrades);
   syncChecked('show-real-switch-closed', showRealTrades);
+  syncChecked('show-only-sl-switch-closed', showOnlyClosedSL);
 }
 
 function setPaperFinishState(running, message='') {
@@ -549,6 +596,7 @@ function getProcessedTrades(tradeList) {
         total_val:      0,
         entry_quantity: 0,
         pnl_usdt:       0,
+        fees_usdt:      0,
         created_at:     t.created_at,
         entry_fill_ts:  t.entry_fill_ts || t.created_at,
         exit_fill_ts:   t.exit_fill_ts,
@@ -559,7 +607,8 @@ function getProcessedTrades(tradeList) {
     g.count++;
     g.entry_quantity += (parseFloat(t.entry_quantity) || 0);
     g.total_val      += (parseFloat(t.entry_price)    || 0) * (parseFloat(t.entry_quantity) || 0);
-    g.pnl_usdt       += (parseFloat(t.pnl_usdt)       || 0);
+    g.pnl_usdt       += tradeNetPnlUsdt(t);
+    g.fees_usdt      += tradeFeesUsdt(t);
     if ((t.created_at   || '') > (g.created_at   || '')) g.created_at   = t.created_at;
     if (((t.entry_fill_ts || t.created_at) || '') > (g.entry_fill_ts || '')) g.entry_fill_ts = t.entry_fill_ts || t.created_at;
     if ((t.exit_fill_ts || '') > (g.exit_fill_ts || '')) g.exit_fill_ts = t.exit_fill_ts;
@@ -567,6 +616,7 @@ function getProcessedTrades(tradeList) {
 
   return Object.values(map).map(g => {
     g.entry_price = g.entry_quantity > 0 ? (g.total_val / g.entry_quantity) : 0;
+    g.pnl_pct = g.total_val > 0 ? (g.pnl_usdt / g.total_val) * 100 : null;
     g.trade_id    = `[${g.count} lotes]`;
     return g;
   });
@@ -639,6 +689,16 @@ function setClosedPairFilter(pair) {
   renderClosed();
 }
 
+function setOpenPairFilter(pair) {
+  openPairFilter = pair || null;
+  renderOpen();
+}
+
+function clearOpenPairFilter() {
+  openPairFilter = null;
+  renderOpen();
+}
+
 function clearClosedPairFilter() {
   closedPairFilter = null;
   renderClosed();
@@ -649,10 +709,19 @@ function clearClosedPairFilter() {
 // ─────────────────────────────────────────────────────────
 
 function renderOpen() {
+  const openFilterBar = document.getElementById('open-pair-filter-bar');
+  const openFilterLabel = document.getElementById('open-pair-filter-label');
+  if (openFilterBar) {
+    openFilterBar.style.display = openPairFilter ? 'flex' : 'none';
+  }
+  if (openFilterLabel) {
+    openFilterLabel.textContent = openPairFilter || '—';
+  }
+
   const open = getProcessedTrades([
     ...trades.filter(t => ['open','opening','signal_received','closing'].includes(t.status) && isTradeVisibleBySource(t)),
     ...(showRealTrades ? buildOrphanTrades() : []),
-  ]);
+  ]).filter(t => !openPairFilter || t.pair === openPairFilter);
 
   open.sort((a, b) => {
     let valA, valB;
@@ -691,7 +760,7 @@ function renderOpen() {
 
   if (!open.length) {
     document.getElementById('tbl-open').innerHTML =
-      '<tr><td class="no-data" colspan="11">Sin trades abiertos</td></tr>';
+      `<tr><td class="no-data" colspan="11">${openPairFilter ? `Sin trades abiertos para ${openPairFilter}` : 'Sin trades abiertos'}</td></tr>`;
     return;
   }
 
@@ -708,7 +777,7 @@ function renderOpen() {
       ? `${t.orphan_meta?.side || '—'} · sin DB`
       : (t.is_grouped ? '—' : (t.signal_data?.categoria || '—'));
     return `<tr data-pair="${t.pair}" data-entry="${t.entry_price || ''}" data-qty="${t.entry_quantity || ''}" data-side="${t.side || 'SHORT'}" data-source="${t.source || 'real'}">
-      <td><b>${t.pair}</b>${sourceBadge(t.source)}${t.is_grouped ? ` <span class="muted">(${t.count})</span>` : ''}</td>
+      <td><b>${t.pair}</b> <button class="btn" style="padding:1px 6px;font-size:10px;" title="Ver solo este par en abiertos" onclick="setOpenPairFilter('${String(t.pair).replace(/'/g, "\\'")}')">solo</button>${sourceBadge(t.source)}${t.is_grouped ? ` <span class="muted">(${t.count})</span>` : ''}</td>
       <td>${badge(t.status)}</td>
       <td>${sizeUsdt !== '—' ? sizeUsdt + ' $' : '—'}</td>
       <td>${fmtPrice(t.entry_price)}</td>
@@ -734,9 +803,15 @@ function renderClosed() {
     closedFilterLabel.textContent = closedPairFilter || '—';
   }
 
-  const closed = getProcessedTrades(
-    trades.filter(t => ['closed','not_executed','error'].includes(t.status) && isTradeVisibleBySource(t))
-  ).filter(t => !closedPairFilter || t.pair === closedPairFilter);
+  const closedBase = trades.filter(t => {
+    if (!['closed','not_executed','error'].includes(t.status)) return false;
+    if (!isTradeVisibleBySource(t)) return false;
+    if (showOnlyClosedSL && t.exit_type !== 'sl') return false;
+    return true;
+  });
+
+  const closed = getProcessedTrades(closedBase)
+    .filter(t => !closedPairFilter || t.pair === closedPairFilter);
 
   closed.sort((a, b) => {
     let valA;
@@ -757,6 +832,15 @@ function renderClosed() {
     } else if (sortClosedCol === 'duration_ms') {
       valA = new Date(a.exit_fill_ts || a.updated_at || 0).getTime() - new Date(a.entry_fill_ts || a.created_at || 0).getTime();
       valB = new Date(b.exit_fill_ts || b.updated_at || 0).getTime() - new Date(b.entry_fill_ts || b.created_at || 0).getTime();
+    } else if (sortClosedCol === 'pnl_usdt') {
+      valA = tradeNetPnlUsdt(a);
+      valB = tradeNetPnlUsdt(b);
+    } else if (sortClosedCol === 'pnl_pct') {
+      valA = tradeNetPnlPct(a) ?? -Infinity;
+      valB = tradeNetPnlPct(b) ?? -Infinity;
+    } else if (sortClosedCol === 'fees_usdt') {
+      valA = tradeFeesUsdt(a);
+      valB = tradeFeesUsdt(b);
     } else {
       valA = a[sortClosedCol] ?? '';
       valB = b[sortClosedCol] ?? '';
@@ -775,7 +859,7 @@ function renderClosed() {
 
   if (!closedLimited.length) {
     document.getElementById('tbl-closed').innerHTML =
-      `<tr><td class="no-data" colspan="14">${closedPairFilter ? `Sin trades para ${closedPairFilter}` : '—'}</td></tr>`;
+      `<tr><td class="no-data" colspan="14">${closedPairFilter ? `Sin trades para ${closedPairFilter}` : (showOnlyClosedSL ? 'Sin trades SL' : '—')}</td></tr>`;
     return;
   }
 
@@ -816,11 +900,11 @@ function renderClosed() {
     <td class="muted">${fmtDateTime(t.entry_fill_ts || t.created_at)}</td>
     <td>${fmtPrice(t.exit_price)}</td>
     <td class="muted">${fmtDateTime(t.exit_fill_ts || t.updated_at)}</td>
-    <td class="${pnlClass(t.pnl_usdt)}">${fmtUSDT(t.pnl_usdt)}</td>
-    <td class="${pnlClass(t.pnl_pct)}">${fmtPct(t.pnl_pct)}</td>
+    <td class="${pnlClass(tradeNetPnlUsdt(t))}">${fmtUSDT(tradeNetPnlUsdt(t))}</td>
+    <td class="${pnlClass(tradeNetPnlPct(t))}">${fmtPct(tradeNetPnlPct(t))}</td>
     <td>${exitIcon(t)}</td>
     <td>${duration(t)}</td>
-    <td class="muted">${fmtFees(t.fees_usdt)}</td>
+    <td class="muted">${fmtFees(tradeFeesUsdt(t))}</td>
     <td class="muted">${t.is_grouped ? t.trade_id : (t.signal_data?.top || '—')}</td>
     <td class="muted">${t.is_grouped ? '—' : (t.signal_data?.categoria || '—')}</td>
   </tr>`;
@@ -1113,6 +1197,7 @@ async function fetchConfig() {
     if (minChip) minChip.style.display = tpPos ? '' : 'none';
     setEl('cfg-min-tp-posicion', s.Min_TP_posicion != null ? s.Min_TP_posicion + '%' : '—');
     setEl('cfg-paper-tp-sl-mode', paperTpSlModeText(s.paper_tp_sl_price_mode));
+    setEl('cfg-paper-friction', s.paper_friction_pct != null ? s.paper_friction_pct + '%' : '—');
     setEl('cfg-profile', profileMeta.loaded ? 'Activo' : 'No cargado');
     const summary = [];
     if (s.capital_per_trade != null) {
@@ -1176,6 +1261,7 @@ async function fetchConfig() {
       const bits = [];
       if (s.timeout_hours != null) bits.push(`Hold ${s.timeout_hours}h`);
       bits.push(`TP/SL ${paperTpSlModeText(s.paper_tp_sl_price_mode)}`);
+      if (s.paper_friction_pct != null) bits.push(`Fricción ${s.paper_friction_pct}%`);
       bits.push('Max abiertos OFF');
       bits.push('Max por par OFF');
       paperExtraEl.textContent = paperTrading ? bits.join(' · ') : '';

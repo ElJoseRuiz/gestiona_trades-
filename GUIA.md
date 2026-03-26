@@ -280,7 +280,9 @@ Esta es la parte importante: no solo qué significa cada campo “en teoría”,
 |---|---|
 | `solo_cerrando_trades` | No abre trades reales nuevos. El bot solo reconcilia y cierra los ya existentes. No convierte automáticamente las nuevas señales en paper. |
 | `paper_trading` | Las señales nuevas van a paper. Además, el motor real pasa a modo solo-cerrando para no abrir posiciones reales nuevas mientras paper está activo. |
-| `paper_tp_sl_price_mode` | Define cómo se evalúan TP/SL en paper con vela de 5m. `close_5m` usa el cierre. `high_low_5m` usa `low` para TP y `high` para SL. |
+| `paper_tp_sl_price_mode` | Define cómo se evalúan TP/SL en paper con vela de 5m. `close_5m` detecta y ejecuta al `close`. `high_low_5m` detecta por `low/high` intravela, pero ejecuta al `trigger_price` del TP o SL. |
+
+| `friction_pct` | Fricción usada para calcular `fees_usdt` en paper. Si el perfil exportado trae `gestion_trade.friction_pct`, ese valor manda sobre `config.yaml`. |
 
 ### 7.4. Filtros de entrada del perfil exportado
 
@@ -340,13 +342,15 @@ En paper:
 - el chequeo de TP/SL se hace con la última vela cerrada de `5m`
 - la comprobación se alinea al cierre real de esa vela más un pequeño margen
 - el modo exacto depende de `paper_tp_sl_price_mode`
+- las `fees_usdt` se estiman al cerrar con la `friction_pct` efectiva sobre entrada y salida; si existe `gestion_trade.friction_pct` en `estrategia/filtros_gestiona_trades.yaml`, ese valor prevalece
+- cuando `paper_trading` está activo, al arrancar se resincronizan también las `fees_usdt` de todos los `paper_trades` cerrados para que el histórico quede alineado con la fricción vigente
 
 Modos:
 
 | Valor | Comportamiento |
 |---|---|
 | `close_5m` | dispara y cierra con el `close` de la vela cerrada de 5m |
-| `high_low_5m` | TP usa `low`; SL usa `high` de la vela cerrada de 5m |
+| `high_low_5m` | detecta el toque intravela usando `low` para TP y `high` para SL, pero el cierre paper se registra al `trigger_price` configurado, no al extremo de la vela |
 
 ---
 
