@@ -16,6 +16,7 @@ from .logger import get_logger
 from .models import Event, Trade, TradeStatus
 
 log = get_logger("state")
+STATE_VERSION = "0.16"
 
 
 _CREATE_TRADE_TABLE_TEMPLATE = """
@@ -325,8 +326,29 @@ class StateDB:
         table = "paper_trades" if paper else "trades"
         return await self._get_dashboard_summary_from_table(table)
 
+    async def sync_paper_closed_trade_fees(self, friction_pct: float) -> int:
+        friction_pct = max(0.0, float(friction_pct))
+        sql = """
+            UPDATE paper_trades
+            SET fees_usdt = ROUND((entry_price + exit_price) * entry_quantity * (? / 100.0), 4)
+            WHERE status = 'closed'
+              AND entry_price IS NOT NULL
+              AND exit_price IS NOT NULL
+              AND entry_quantity IS NOT NULL
+        """
+        cursor = await self._db.execute(sql, (friction_pct,))
+        await self._db.commit()
+        updated = cursor.rowcount if cursor.rowcount != -1 else 0
+        await cursor.close()
+        log.info(
+            f"StateDB v{STATE_VERSION}: resincronizadas {updated} fees de paper_trades "
+            f"cerrados con friction_pct={friction_pct:.4f}%"
+        )
+        return updated
+
     async def _get_dashboard_summary_from_table(self, table: str) -> dict:
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        pnl_expr = "pnl_usdt - COALESCE(fees_usdt, 0)" if table == "paper_trades" else "pnl_usdt"
         active_statuses = (
             TradeStatus.OPEN.value,
             TradeStatus.OPENING.value,
@@ -342,14 +364,14 @@ class StateDB:
                 SUM(CASE WHEN entry_fill_ts LIKE ? THEN 1 ELSE 0 END) AS entries_today,
                 SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed_total,
                 SUM(CASE WHEN status = 'closed' AND pnl_usdt > 0 THEN 1 ELSE 0 END) AS wins_total,
-                SUM(CASE WHEN status = 'closed' THEN pnl_usdt ELSE 0 END) AS pnl_total,
+                SUM(CASE WHEN status = 'closed' THEN {pnl_expr} ELSE 0 END) AS pnl_total,
                 SUM(CASE WHEN status = 'closed'
                           AND COALESCE(exit_fill_ts, updated_at, '') LIKE ? THEN 1 ELSE 0 END) AS closed_today,
                 SUM(CASE WHEN status = 'closed'
                           AND COALESCE(exit_fill_ts, updated_at, '') LIKE ?
                           AND pnl_usdt > 0 THEN 1 ELSE 0 END) AS wins_today,
                 SUM(CASE WHEN status = 'closed'
-                          AND COALESCE(exit_fill_ts, updated_at, '') LIKE ? THEN pnl_usdt ELSE 0 END) AS pnl_today,
+                          AND COALESCE(exit_fill_ts, updated_at, '') LIKE ? THEN {pnl_expr} ELSE 0 END) AS pnl_today,
                 SUM(CASE WHEN status = 'closed'
                           AND COALESCE(exit_fill_ts, updated_at, '') LIKE ?
                           AND COALESCE(exit_type, '') <> 'manual' THEN 1 ELSE 0 END) AS closed_today_non_manual,
@@ -406,12 +428,13 @@ class StateDB:
 
     async def _get_daily_metrics_from_table(self, table: str) -> dict:
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        pnl_expr = "pnl_usdt - COALESCE(fees_usdt, 0)" if table == "paper_trades" else "pnl_usdt"
         sql = f"""
             SELECT
                 COUNT(*) as total_closed,
                 SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END) as wins,
-                SUM(pnl_usdt) as pnl_total,
-                SUM(CASE WHEN exit_fill_ts LIKE ? THEN pnl_usdt ELSE 0 END) as pnl_today,
+                SUM({pnl_expr}) as pnl_total,
+                SUM(CASE WHEN exit_fill_ts LIKE ? THEN {pnl_expr} ELSE 0 END) as pnl_today,
                 SUM(CASE WHEN exit_fill_ts LIKE ? THEN 1 ELSE 0 END) as closed_today
             FROM {table}
             WHERE status = 'closed'

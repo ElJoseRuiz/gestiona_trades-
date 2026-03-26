@@ -15,7 +15,7 @@ from .filtros_gestiona_trades import (
     load_filtros_gestiona_trades,
 )
 
-CONFIG_VERSION = "0.13"
+CONFIG_VERSION = "0.14"
 
 
 class Config:
@@ -125,6 +125,8 @@ class Config:
         strategy["solo_cerrando_trades"] = self.real_trading_solo_cerrando
         strategy["paper_trading"] = self.paper_trading
         strategy["paper_tp_sl_price_mode"] = self.paper_tp_sl_price_mode
+        strategy["friction_pct"] = self.paper_friction_pct
+        strategy["paper_friction_pct"] = self.paper_friction_pct
         strategy["solo_cerrando_trades_config"] = self.solo_cerrando_trades
         return strategy
 
@@ -308,6 +310,16 @@ class Config:
             "intravela_5m": "high_low_5m",
         }
         return aliases.get(mode, "close_5m")
+
+    @property
+    def paper_friction_pct(self) -> float:
+        friction_pct = self._effective_value(
+            ("gestion_trade", "friction_pct"),
+            ("strategy", "friction_pct"),
+            default=0.15,
+        )
+        return max(0.0, float(friction_pct))
+
     @property
     def real_trading_solo_cerrando(self) -> bool:
         return self.solo_cerrando_trades or self.paper_trading
@@ -532,6 +544,7 @@ class Config:
                 "tp_pos": self._profile_has("gestion_trade", "tp_pos") and self._profile_get("gestion_trade", "tp_pos") is not None,
                 "sl_pos": self._profile_has("gestion_trade", "sl_pos") and self._profile_get("gestion_trade", "sl_pos") is not None,
                 "min_tp_posicion": self._profile_has("gestion_trade", "min_tp_posicion") and self._profile_get("gestion_trade", "min_tp_posicion") is not None,
+                "friction_pct": self._profile_has("gestion_trade", "friction_pct") and self._profile_get("gestion_trade", "friction_pct") is not None,
                 "max_hold": self._profile_has("gestion_trade", "max_hold") and self._profile_get("gestion_trade", "max_hold") is not None,
                 "max_par": self._profile_has("limites", "max_par") and self._profile_get("limites", "max_par") is not None,
                 "max_global": self._profile_has("limites", "max_global") and self._profile_get("limites", "max_global") is not None,

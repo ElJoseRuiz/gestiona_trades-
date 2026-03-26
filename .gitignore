@@ -23,3 +23,7 @@ env/
 
 # Archivos locales auxiliares
 sqlite3
+
+# Artefactos locales del flujo de trabajo
+backups/
+estrategia/

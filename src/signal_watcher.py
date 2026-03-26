@@ -25,6 +25,8 @@ from .config import Config
 from .logger import get_logger
 from .models import Signal
 
+COMPONENT_VERSION = "0.12"
+
 log = get_logger("signal_watcher")
 
 OnSignalCallback = Callable[[Signal], Awaitable[None]]
@@ -358,6 +360,20 @@ def _read_csv(path: Path) -> List[dict]:
     return rows
 
 
+def _detect_csv_newline(text: str) -> str:
+    """
+    Detecta el separador de linea preferido del CSV.
+    Si el fichero ya viene corrupto con '\r' sueltos, lo normaliza a CRLF.
+    """
+    if "\r\n" in text:
+        return "\r\n"
+    if "\n" in text:
+        return "\n"
+    if "\r" in text:
+        return "\r\n"
+    return "\n"
+
+
 def _update_csv(path: Path, updates: dict) -> None:
     """
     Actualiza la columna 'leido' de las filas indicadas.
@@ -368,12 +384,17 @@ def _update_csv(path: Path, updates: dict) -> None:
         content = path.read_bytes()
         encoding = "utf-8-sig" if content.startswith(b"\xef\xbb\xbf") else "utf-8"
         text = content.decode(encoding)
-        lines = text.splitlines(keepends=True)
+        newline_style = _detect_csv_newline(text)
+        lines = text.splitlines()
 
         if not lines:
             return
 
-        header_line = lines[0].rstrip("\r\n")
+        non_blank_lines = [line for line in lines if line.strip()]
+        if not non_blank_lines:
+            return
+
+        header_line = non_blank_lines[0].strip()
         sep = ","
         headers = [h.strip() for h in header_line.split(sep)]
         try:
@@ -382,15 +403,12 @@ def _update_csv(path: Path, updates: dict) -> None:
             log.warning("Columna 'leido' no encontrada en CSV, no se puede actualizar")
             return
 
-        new_lines = [lines[0]]
-        for line in lines[1:]:
-            stripped = line.rstrip("\r\n")
-            if not stripped:
-                new_lines.append(line)
-                continue
-
+        # Reescribimos el fichero sin lineas vacias para impedir la acumulacion
+        # de saltos de linea corruptos al marcar la columna "leido".
+        new_lines = [header_line + newline_style]
+        for line in non_blank_lines[1:]:
+            stripped = line.strip()
             parts = stripped.split(sep)
-            ending = "\r\n" if line.endswith("\r\n") else "\n"
 
             try:
                 key = (
@@ -401,17 +419,17 @@ def _update_csv(path: Path, updates: dict) -> None:
                     ),
                 )
             except IndexError:
-                new_lines.append(line)
+                new_lines.append(stripped + newline_style)
                 continue
 
             if key in updates and leido_idx < len(parts):
                 parts[leido_idx] = updates[key]
-                new_lines.append(sep.join(parts) + ending)
+                new_lines.append(sep.join(parts) + newline_style)
             else:
-                new_lines.append(line)
+                new_lines.append(stripped + newline_style)
 
         tmp = path.with_suffix(".tmp")
-        tmp.write_text("".join(new_lines), encoding="utf-8")
+        tmp.write_text("".join(new_lines), encoding=encoding, newline="")
         tmp.replace(path)
         log.debug(f"CSV actualizado: {len(updates)} filas marcadas")
 
