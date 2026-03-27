@@ -16,7 +16,7 @@ Este archivo describe la estructura del código, flujos de trabajo y convencione
 gestiona_trades/
 ├── gestiona_trades.py           # Punto de entrada principal (clase App)
 ├── requirements.txt             # Dependencias Python
-├── config.yaml.example          # Plantilla de configuración (copiar a config.yaml)
+├── config.example.yaml          # Plantilla de configuración (copiar a config.yaml)
 ├── GUIA.md                      # Documentación completa en español
 ├── .gitignore
 │
@@ -69,7 +69,7 @@ source .venv/bin/activate        # Linux/macOS
 pip install -r requirements.txt
 
 # Copiar y editar la configuración
-cp config.yaml.example config.yaml
+cp config.example.yaml config.yaml
 # Editar config.yaml con API keys y parámetros de estrategia
 
 # Ejecutar
@@ -81,7 +81,7 @@ python gestiona_trades.py --config /ruta/a/config.yaml
 
 ## Configuración (`config.yaml`)
 
-El archivo `config.yaml` **nunca se debe commitear** (está en `.gitignore`). Usar `config.yaml.example` como plantilla.
+El archivo `config.yaml` **nunca se debe commitear** (está en `.gitignore`). Usar `config.example.yaml` como plantilla.
 
 ### Secciones principales
 

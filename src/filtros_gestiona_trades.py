@@ -18,7 +18,7 @@ import yaml
 
 SUPPORTED_SCHEMA_VERSION = 1
 DEFAULT_PROFILE_PATH = "estrategia/filtros_gestiona_trades.yaml"
-FILTROS_GESTIONA_TRADES_VERSION = "0.13"
+FILTROS_GESTIONA_TRADES_VERSION = "0.14"
 
 
 @dataclass(slots=True)
@@ -83,6 +83,16 @@ def _normalize_profile(data: dict[str, Any], warnings: list[str], path: Path) ->
     macro_btc = _as_dict(data.get("macro_btc"))
     kill_switch_pf = _as_dict(data.get("kill_switch_pf"))
 
+    overlap_value = filtros_entrada.get(
+        "filtro_excluir_overlap",
+        filtros_entrada.get("filtro_overlap"),
+    )
+
+    if "filtro_overlap" in filtros_entrada and "filtro_excluir_overlap" not in filtros_entrada:
+        warnings.append(
+            "filtros_entrada.filtro_overlap esta deprecado; usar filtro_excluir_overlap."
+        )
+
     normalized = {
         "schema_version": schema_version,
         "exportado_utc": _as_str(data.get("exportado_utc")),
@@ -109,7 +119,8 @@ def _normalize_profile(data: dict[str, Any], warnings: list[str], path: Path) ->
             "dias_semana": _as_int_list(filtros_entrada.get("dias_semana")),
             "quintiles": _as_quintiles(filtros_entrada.get("quintiles")),
             "categorias": _as_str_list(filtros_entrada.get("categorias")),
-            "filtro_overlap": _as_bool(filtros_entrada.get("filtro_overlap"), default=False),
+            "filtro_excluir_overlap": _as_bool(overlap_value, default=False),
+            "filtro_overlap": _as_bool(overlap_value, default=False),
             "ignore_n": _as_int(filtros_entrada.get("ignore_n"), default=0),
             "ignore_h": _as_float(filtros_entrada.get("ignore_h"), default=0.0),
         },

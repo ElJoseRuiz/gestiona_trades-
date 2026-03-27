@@ -124,7 +124,7 @@
     <div style="display:flex; align-items: center; gap: 15px;">
       <div class="brand-block">
         <h1>📈 Gestiona Trades</h1>
-        <div class="brand-version">control_mision v0.30</div>
+        <div class="brand-version">control_mision v0.34</div>
       </div>
       <a href="/history" target="_blank" style="font-size:11px; background:#252850; padding:3px 8px; border-radius:4px; border:1px solid #3a3d52; color:#c9cde0;">📊 Ver Analítica Histórica</a>
     </div>
@@ -135,7 +135,6 @@
     <div class="stat-chip cfg-chip"><span class="label">Perfil YAML</span><span class="value" id="cfg-profile" style="font-size:13px">—</span></div>
     <div class="stat-chip cfg-chip"><span class="label">Filtros Entrada</span><span class="value" id="cfg-filters" style="font-size:13px">—</span></div>
     <div class="stat-chip"><span class="label">Balance USDT</span><span class="value" id="s-balance">—</span></div>
-    <div class="stat-chip"><span class="label">Huérfanas Binance</span><span class="value" id="s-orphans">—</span></div>
   </div>
   <div style="font-size:11px;color:#4a4e6a" id="last-update">—</div>
 </div>
@@ -162,6 +161,7 @@
     <div class="stat-chip"><span class="label">Trades cerrados (hoy-total)</span><span class="value" id="s-trades-today">—</span></div>
     <div class="stat-chip"><span class="label">Win Rate (hoy-total)</span><span class="value" id="s-wr">—</span></div>
     <div class="stat-chip"><span class="label">PnL (hoy-total)</span><span class="value" id="s-pnl-total">—</span></div>
+    <div class="stat-chip"><span class="label">Huérfanas Binance</span><span class="value" id="s-orphans">—</span></div>
     <div class="stat-chip"><span class="label">Uptime desde</span><span class="value" id="s-uptime" style="font-size:11px">—</span></div>
     <div style="width:1px;background:#2d3150;align-self:stretch;margin:0 4px"></div>
     <div class="stat-chip cfg-chip"><span class="label">TP Posición</span><span class="value" id="cfg-tp-posicion" style="font-size:13px">—</span></div>
@@ -294,7 +294,7 @@
   </div>
 
 </div>
-<div class="footer">control_mision v0.30 · actualización en tiempo real vía WebSocket</div>
+<div class="footer">control_mision v0.34 · actualización en tiempo real vía WebSocket</div>
 
 <script>
 // ─────────────────────────────────────────────────────────
@@ -1204,15 +1204,13 @@ async function fetchConfig() {
       summary.push(`${s.capital_per_trade}$`);
     }
     if (paperTrading) {
-      summary.push('max OFF');
-      summary.push('par OFF');
-    } else {
-      if (s.max_open_trades != null) {
-        summary.push(`max ${s.max_open_trades}`);
-      }
-      if (s.max_trades_per_pair != null) {
-        summary.push(`par ${s.max_trades_per_pair}`);
-      }
+      summary.push('paper ON');
+    }
+    if (s.max_open_trades != null) {
+      summary.push(`max ${s.max_open_trades}`);
+    }
+    if (s.max_trades_per_pair != null) {
+      summary.push(`par ${s.max_trades_per_pair}`);
     }
     if (s.tp_pct != null) {
       summary.push(`TP ${s.tp_pct}%`);
@@ -1235,7 +1233,7 @@ async function fetchConfig() {
     if (filters.quintiles && filters.quintiles.length) {
       summary.push(filters.quintiles.join('/'));
     }
-    if (filters.filtro_overlap) summary.push('overlap');
+    summary.push(filters.filtro_excluir_overlap ? 'ov ON' : 'ov OFF');
     if (filters.ignore_n) summary.push(`ignore ${filters.ignore_n}`);
     setEl('cfg-filters', summary.length ? summary.join(' | ') : 'Base');
 
@@ -1262,8 +1260,9 @@ async function fetchConfig() {
       if (s.timeout_hours != null) bits.push(`Hold ${s.timeout_hours}h`);
       bits.push(`TP/SL ${paperTpSlModeText(s.paper_tp_sl_price_mode)}`);
       if (s.paper_friction_pct != null) bits.push(`Fricción ${s.paper_friction_pct}%`);
-      bits.push('Max abiertos OFF');
-      bits.push('Max por par OFF');
+      if (s.max_open_trades != null) bits.push(`Max abiertos ${s.max_open_trades}`);
+      if (s.max_trades_per_pair != null) bits.push(`Max por par ${s.max_trades_per_pair}`);
+      bits.push('Trading real solo cierre');
       paperExtraEl.textContent = paperTrading ? bits.join(' · ') : '';
     }
   } catch(e) { console.error('fetchConfig', e); }

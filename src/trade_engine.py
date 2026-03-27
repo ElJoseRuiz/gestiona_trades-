@@ -39,7 +39,7 @@ from .ws_manager import WSManager
 log = get_logger("trade_engine")
 
 OnEventCallback = Callable[[Event], Awaitable[None]]
-TRADE_ENGINE_VERSION = "0.11"
+TRADE_ENGINE_VERSION = "0.12"
 
 
 class TradeEngine:
@@ -658,7 +658,7 @@ class TradeEngine:
     async def on_signal(self, sig: Signal):
         if self._cfg.signal_filter_overlap and self.open_count_pair(sig.pair) > 0:
             log.info(
-                f"Señal {sig.pair} descartada: filtro_overlap activo "
+                f"Señal {sig.pair} descartada: filtro_excluir_overlap activo "
                 f"(hay operativa viva en el par)"
             )
             return

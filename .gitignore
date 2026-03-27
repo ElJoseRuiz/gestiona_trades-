@@ -1,6 +1,8 @@
 # Config con credenciales
 config.yaml
+config_*.yaml
 config_old.yaml
+!config.example.yaml
 
 # Base de datos
 data/

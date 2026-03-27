@@ -1,0 +1,17 @@
+[Unit]
+Description=gestiona_trades
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=debian
+WorkingDirectory=/opt/gestiona_trades
+ExecStart=/opt/gestiona_trades/.venv/bin/python /opt/gestiona_trades/gestiona_trades.py --config /opt/gestiona_trades/config.yaml
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

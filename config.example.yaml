@@ -1,0 +1,85 @@
+binance:
+  api_key: "YOUR_API_KEY_HERE"                  # Clave API de Binance Futures con permisos de trading.
+  api_secret: "YOUR_API_SECRET_HERE"            # Secreto API asociado a la clave anterior.
+  base_url: "https://fapi.binance.com"          # Endpoint REST de Binance Futures. Cambia a testnet si vas a probar.
+
+strategy:
+  mode: "short"                                 # Modo operativo del bot. Hoy el motor solo soporta SHORT.
+  solo_cerrando_trades: false                   # Si es true, no abre trades reales nuevos; solo gestiona cierres.
+  paper_trading: false                          # Si es true, las nuevas señales se ejecutan en paper y lo real queda solo cerrando.
+  paper_tp_sl_price_mode: "close_5m"            # "close_5m" usa el cierre de la vela 5m; "high_low_5m" detecta por intravela y ejecuta al trigger.
+  capital_per_trade: 10                         # Capital nominal en USDT por operación.
+  max_open_trades: 10                           # Límite global de trades abiertos simultáneamente.
+  tp_pct: 15                                    # Take profit por trade en porcentaje.
+  sl_pct: 60                                    # Stop loss por trade en porcentaje.
+  TP_posicion: false                            # Si es true, al tocar TP se cierran los trades hermanos del mismo par.
+  SL_posicion: false                            # Si es true, al tocar SL se cierran los trades hermanos del mismo par.
+  Min_TP_posicion: 0.0                          # PnL mínimo combinado (%) para permitir la cascada de TP; 0 la desactiva.
+  timeout_hours: 24                             # Máximo tiempo de vida de un trade antes de forzar cierre por timeout.
+  leverage: 1                                   # Apalancamiento configurado en Binance para los pares que se operen.
+  min_momentum_pct: 0                           # Fallback legacy para momentum mínimo si no lo pisa el perfil exportado.
+  min_vol_ratio: 0                              # Fallback legacy para vol_ratio mínimo si no lo pisa el perfil exportado.
+  min_trades_ratio: 0                           # Fallback legacy para trades_ratio mínimo si no lo pisa el perfil exportado.
+  allowed_quintiles: [1, 2, 3, 4, 5]            # Fallback legacy de quintiles permitidos si no hay perfil con quintiles.
+  max_trades_per_pair: 1                        # Límite de trades abiertos simultáneamente para un mismo par.
+  quarantine_hours: 4.0                         # Horas de cuarentena tras un cierre antes de volver a aceptar ese par.
+  friction_pct: 0.15                            # Fallback de fricción para paper si el perfil no define gestion_trade.friction_pct.
+
+strategy_profile:
+  path: "estrategia/filtros_gestiona_trades.yaml"  # Ruta al perfil exportado por el dashboard de optimización.
+
+signals:
+  file_path: "fut_pares_short.csv"              # CSV live que aporta las señales al bot.
+  poll_interval_seconds: 15                     # Cada cuántos segundos se revisa si el CSV cambió.
+  max_signal_age_minutes: 10                    # Antigüedad máxima aceptada para una señal antes de marcarla como timeout.
+  # Formato mínimo recomendado del CSV:
+  # fecha_hora,par,rank,close,mom_pct,vol_ratio,trades_ratio,quintil,bp,categoria,leido
+
+entry:
+  order_type: "BBO"                             # hoy el flujo real está cableado como chase BBO + fallback MARKET.
+  chase_interval_seconds: 2                     # Espera entre recolocaciones de la orden de entrada si sigue viva.
+  chase_timeout_seconds: 30                     # Tiempo máximo de espera por intento antes de cancelar y recolocar.
+  max_chase_attempts: 3                         # Número máximo de intentos de chase antes de desistir.
+  market_fallback: false                        # Si es true, tras agotar los intentos entra a mercado.
+
+exit:
+  timeout_order_type: "BBO"                     # Tipo de orden preferido para cierres por timeout: "BBO", "LIMIT" o "MARKET".
+  timeout_chase_seconds: 30                     # Tiempo máximo para intentar cerrar por BBO/LIMIT antes del fallback.
+  timeout_market_fallback: true                 # Si es true, hace fallback a MARKET si el cierre por timeout no llena.
+  sl_chase_timeout_s: 2.0                       # Timeout del chase de SL si esa ruta está habilitada en el motor.
+  sl_chase_max_attempts: 3                      # Intentos máximos del chase de SL si esa ruta está habilitada en el motor.
+  sl_price_match: "OPPONENT"                    # priceMatch usado por el flujo de chase de SL cuando aplica.
+
+dashboard:
+  enabled: true                                 # Si es true, levanta el dashboard web local.
+  host: "0.0.0.0"                               # Host de escucha del dashboard.
+  port: 8080                                    # Puerto HTTP del dashboard.
+
+notifications:
+  enabled: false                                # Activa el envio de avisos externos del bot.
+  instance_name: "gestiona_trades_vps"          # Nombre corto de la instancia para distinguir mensajes.
+  telegram:
+    enabled: true                               # Canal recomendado para avisos rapidos desde un VPS.
+    bot_token: ""                               # Token del bot de Telegram creado con BotFather.
+    chat_id: ""                                 # Chat o grupo donde quieres recibir los mensajes.
+  rules:
+    notify_startup: true                        # Avisa cuando el bot arranca correctamente.
+    notify_shutdown: true                       # Avisa cuando el bot se detiene.
+    notify_errors: true                         # Avisa ante eventos ERROR y errores fatales.
+    notify_orphans: true                        # Avisa si detecta posiciones huerfanas en Binance.
+    notify_ws_disconnect: true                  # Avisa si el WebSocket de Binance lleva caido mas del umbral.
+    notify_summary: true                        # Envia un resumen periodico del estado del bot.
+    health_check_interval_seconds: 300          # Cada cuantos segundos evalua salud, WS y huerfanas.
+    summary_interval_minutes: 240               # Cada cuantos minutos envia un resumen si esta activado.
+    ws_disconnect_grace_minutes: 5              # Minutos de gracia antes de avisar de una caida del WS.
+    orphan_repeat_minutes: 30                   # Minutos minimos entre avisos repetidos de huerfanas.
+
+logging:
+  level: "DEBUG"                                # Nivel de log al fichero.
+  file: "logs/gestiona_trades.log"              # Ruta del fichero principal de logs.
+  max_bytes: 10485760                           # Tamaño máximo por fichero de log antes de rotar.
+  backup_count: 5                               # Número de ficheros rotados a conservar.
+  console_level: "INFO"                         # Nivel de log mostrado por consola.
+
+database:
+  path: "data/trades.db"                        # Ruta de la base de datos SQLite del bot.

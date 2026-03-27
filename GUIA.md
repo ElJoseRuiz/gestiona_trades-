@@ -74,7 +74,7 @@ pip install -r requirements.txt
 ### 3.4. Crear la configuración
 
 ```powershell
-Copy-Item config.yaml.example config.yaml
+Copy-Item config.example.yaml config.yaml
 ```
 
 Edita `config.yaml` con:
@@ -129,7 +129,7 @@ pip install -r requirements.txt
 ### 4.4. Crear la configuración
 
 ```bash
-cp config.yaml.example config.yaml
+cp config.example.yaml config.yaml
 ```
 
 Edita `config.yaml` y después arranca:
@@ -297,7 +297,7 @@ Estos campos suelen venir de `estrategia/filtros_gestiona_trades.yaml` y afectan
 | `bp_min`, `bp_max` | Filtra por el campo `bp` si la señal lo trae. |
 | `quintiles` | Solo acepta señales de los quintiles indicados. |
 | `categorias` | Solo acepta señales de las categorías indicadas. |
-| `filtro_overlap` | Activa el rechazo por overlap cuando el perfil lo exige. |
+| `filtro_excluir_overlap` | Activa el rechazo por overlap cuando el perfil lo exige. |
 | `ignore_n` | Ignora las primeras `N` señales de un par sin trade abierto. Solo deja abrir a partir de la `N + 1`. |
 | `ignore_h` | Ventana temporal en horas para el contador de `ignore_n`. Si expira, el ciclo se reinicia. |
 | `hora_min`, `hora_max` | Restringe la entrada a ciertas horas UTC si vienen informadas. |
@@ -318,7 +318,6 @@ Estos campos siguen existiendo por compatibilidad, pero si el perfil exportado t
 
 | Parámetro | Estado actual |
 |---|---|
-| `trigger_offset_pct` | Se conserva por compatibilidad histórica, pero hoy no afecta a la lógica real. |
 | algunos campos avanzados de `macro_btc` | Se parsean y se auditan, pero no están plenamente operativos en el motor actual. |
 | `global_tp`, `global_tp_win`, `kill_switch_pf` | Se parsean, pero requieren soporte adicional para tener efecto completo. |
 
@@ -375,7 +374,7 @@ Filtros habituales que hoy sí se usan:
 - `quintiles`
 - `hora_min`, `hora_max`
 - `dias_semana`
-- `filtro_overlap`
+- `filtro_excluir_overlap`
 - `ignore_n`, `ignore_h`
 
 ---
@@ -470,7 +469,11 @@ tail -f logs/gestiona_trades.log
 Windows:
 
 ```powershell
-.venv\Scripts\Activate.ps1
+# Si usas una venv dentro del repo:
+.\.venv\Scripts\Activate.ps1
+
+# Si prefieres una venv fuera de Dropbox, usa tu ruta real:
+# C:\venvs\gestiona_trades\Scripts\Activate.ps1
 python gestiona_trades.py
 ```
 
@@ -506,13 +509,13 @@ El bot intenta apagar tareas de forma ordenada. En real, las órdenes y posicion
 Crea el fichero:
 
 ```bash
-cp config.yaml.example config.yaml
+cp config.example.yaml config.yaml
 ```
 
 En Windows:
 
 ```powershell
-Copy-Item config.yaml.example config.yaml
+Copy-Item config.example.yaml config.yaml
 ```
 
 ### `ModuleNotFoundError`

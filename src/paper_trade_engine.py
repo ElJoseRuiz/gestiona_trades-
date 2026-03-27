@@ -24,7 +24,7 @@ from .state import StateDB
 log = get_logger("paper_trade_engine")
 
 OnEventCallback = Callable[[Event], Awaitable[None]]
-PAPER_TRADE_ENGINE_VERSION = "0.22"
+PAPER_TRADE_ENGINE_VERSION = "0.24"
 _PAPER_KLINE_INTERVAL_S = 300
 _PAPER_KLINE_GRACE_S = 10
 _KLINE_WARNING_INTERVAL_S = 300.0
@@ -185,7 +185,7 @@ class PaperTradeEngine:
     async def on_signal(self, sig: Signal):
         if self._cfg.signal_filter_overlap and self.open_count_pair(sig.pair) > 0:
             log.info(
-                f"Señal PAPER {sig.pair} descartada: filtro_overlap activo "
+                f"Señal PAPER {sig.pair} descartada: filtro_excluir_overlap activo "
                 "(hay operativa paper viva en el par)"
             )
             return
@@ -208,6 +208,20 @@ class PaperTradeEngine:
                         f"(último cierre paper hace {hours_since:.2f}h, requiere {self._cfg.quarantine_hours}h)"
                     )
                     return
+
+        if self.open_count >= self._cfg.max_open_trades:
+            log.info(
+                f"Señal PAPER {sig.pair} descartada: max_open_trades "
+                f"({self._cfg.max_open_trades}) alcanzado"
+            )
+            return
+
+        if self.open_count_pair(sig.pair) >= self._cfg.max_trades_per_pair:
+            log.info(
+                f"Señal PAPER {sig.pair} descartada: max_trades_per_pair "
+                f"({self._cfg.max_trades_per_pair}) alcanzado"
+            )
+            return
 
         trade = Trade(
             pair=sig.pair,

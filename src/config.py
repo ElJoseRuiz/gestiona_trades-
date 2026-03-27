@@ -15,7 +15,7 @@ from .filtros_gestiona_trades import (
     load_filtros_gestiona_trades,
 )
 
-CONFIG_VERSION = "0.14"
+CONFIG_VERSION = "0.17"
 
 
 class Config:
@@ -147,6 +147,7 @@ class Config:
             "dias_semana": self.signal_dias_semana,
             "quintiles": self.signal_allowed_quintile_labels,
             "categorias": self.signal_allowed_categories,
+            "filtro_excluir_overlap": self.signal_filter_overlap,
             "filtro_overlap": self.signal_filter_overlap,
             "ignore_n": self.signal_ignore_n,
             "ignore_h": self.signal_ignore_h,
@@ -269,8 +270,6 @@ class Config:
             )
         )
 
-    @property
-    def trigger_offset_pct(self)  -> float:      return float(self._get("strategy", "trigger_offset_pct",default=10))
     @property
     def timeout_hours(self) -> float:
         return float(self._effective_value(("gestion_trade", "max_hold"), ("strategy", "timeout_hours"), default=24))
@@ -407,7 +406,10 @@ class Config:
 
     @property
     def signal_filter_overlap(self) -> bool:
-        return bool(self._profile_get("filtros_entrada", "filtro_overlap", default=False))
+        overlap = self._profile_get("filtros_entrada", "filtro_excluir_overlap", default=None)
+        if overlap is None:
+            overlap = self._profile_get("filtros_entrada", "filtro_overlap", default=False)
+        return bool(overlap)
 
     @property
     def signal_ignore_n(self) -> int:
@@ -476,8 +478,6 @@ class Config:
     def sl_chase_max_attempts(self) -> int:   return int(self._get("exit",   "sl_chase_max_attempts", default=3))
     @property
     def sl_price_match(self)        -> str:   return self._get("exit", "sl_price_match",              default="OPPONENT")
-    @property
-    def sl_mark_poll_interval(self) -> float: return float(self._get("exit", "sl_mark_poll_interval", default=1.0))
 
     # ──────────────────────────────────────────────────────────────────────
     # Dashboard
@@ -505,6 +505,133 @@ class Config:
     @property
     def log_console_level(self) -> str: return self._get("logging", "console_level", default="INFO")
 
+    # ----------------------------------------------------------------------
+    # Notificaciones
+    # ----------------------------------------------------------------------
+
+    @property
+    def instance_name(self) -> str:
+        configured = str(self._get("notifications", "instance_name", default="") or "").strip()
+        return configured or self._path.stem
+
+    @property
+    def notifications_enabled(self) -> bool:
+        return self._as_bool(self._get("notifications", "enabled", default=False), default=False)
+
+    @property
+    def telegram_enabled(self) -> bool:
+        enabled = self._as_bool(
+            self._get("notifications", "telegram", "enabled", default=False),
+            default=False,
+        )
+        return self.notifications_enabled and enabled
+
+    @property
+    def telegram_bot_token(self) -> str:
+        return str(self._get("notifications", "telegram", "bot_token", default="") or "").strip()
+
+    @property
+    def telegram_chat_id(self) -> str:
+        return str(self._get("notifications", "telegram", "chat_id", default="") or "").strip()
+
+    @property
+    def notify_startup(self) -> bool:
+        return self._as_bool(
+            self._get("notifications", "rules", "notify_startup", default=True),
+            default=True,
+        )
+
+    @property
+    def notify_shutdown(self) -> bool:
+        return self._as_bool(
+            self._get("notifications", "rules", "notify_shutdown", default=True),
+            default=True,
+        )
+
+    @property
+    def notify_errors(self) -> bool:
+        return self._as_bool(
+            self._get("notifications", "rules", "notify_errors", default=True),
+            default=True,
+        )
+
+    @property
+    def notify_orphans(self) -> bool:
+        return self._as_bool(
+            self._get("notifications", "rules", "notify_orphans", default=True),
+            default=True,
+        )
+
+    @property
+    def notify_ws_disconnect(self) -> bool:
+        return self._as_bool(
+            self._get("notifications", "rules", "notify_ws_disconnect", default=True),
+            default=True,
+        )
+
+    @property
+    def notify_summary(self) -> bool:
+        return self._as_bool(
+            self._get("notifications", "rules", "notify_summary", default=True),
+            default=True,
+        )
+
+    @property
+    def notify_health_check_interval_seconds(self) -> int:
+        return max(
+            30,
+            int(
+                self._get(
+                    "notifications",
+                    "rules",
+                    "health_check_interval_seconds",
+                    default=300,
+                )
+            ),
+        )
+
+    @property
+    def notify_summary_interval_minutes(self) -> int:
+        return max(
+            0,
+            int(
+                self._get(
+                    "notifications",
+                    "rules",
+                    "summary_interval_minutes",
+                    default=240,
+                )
+            ),
+        )
+
+    @property
+    def notify_ws_disconnect_grace_minutes(self) -> int:
+        return max(
+            0,
+            int(
+                self._get(
+                    "notifications",
+                    "rules",
+                    "ws_disconnect_grace_minutes",
+                    default=5,
+                )
+            ),
+        )
+
+    @property
+    def notify_orphan_repeat_minutes(self) -> int:
+        return max(
+            1,
+            int(
+                self._get(
+                    "notifications",
+                    "rules",
+                    "orphan_repeat_minutes",
+                    default=30,
+                )
+            ),
+        )
+
     # ──────────────────────────────────────────────────────────────────────
     # Database
     # ──────────────────────────────────────────────────────────────────────
@@ -522,6 +649,14 @@ class Config:
         d = copy.deepcopy(self._d)
         d.get("binance", {}).pop("api_key",    None)
         d.get("binance", {}).pop("api_secret", None)
+        notifications = d.get("notifications", {})
+        if isinstance(notifications, dict):
+            telegram = notifications.get("telegram", {})
+            if isinstance(telegram, dict):
+                telegram["bot_token_configured"] = bool(telegram.get("bot_token"))
+                telegram["chat_id_configured"] = bool(telegram.get("chat_id"))
+                telegram.pop("bot_token", None)
+                telegram.pop("chat_id", None)
         d["strategy"] = self._effective_strategy_dict()
         d["effective_filters_entrada"] = self._effective_filters_dict()
         d["filtros_gestiona_trades"] = self.profile
