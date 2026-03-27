@@ -34,7 +34,7 @@ import argparse
 import asyncio
 import signal
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import median
 
@@ -48,6 +48,7 @@ from src.config        import Config
 from src.dashboard     import DashboardServer
 from src.logger        import get_logger, setup_logging
 from src.models        import Event, EventType, Trade, TradeStatus
+from src.notifier      import NOTIFIER_VERSION, Notifier
 from src.order_manager import BinanceError, OrderManager
 from src.paper_trade_engine import PAPER_TRADE_ENGINE_VERSION, PaperTradeEngine
 from src.signal_watcher import SignalWatcher
@@ -55,7 +56,7 @@ from src.state         import StateDB
 from src.trade_engine  import TradeEngine
 from src.ws_manager    import WSManager
 
-APP_VERSION = "0.20"
+APP_VERSION = "0.21"
 
 log = get_logger("main")
 
@@ -77,6 +78,13 @@ class App:
         self._configured_pairs: set[str] = set()
         self._shutdown_started = False
         self._paper_finish_in_progress = False
+        self._notifier = Notifier(cfg)
+        self._notify_task: asyncio.Task | None = None
+        self._ws_disconnected_since: datetime | None = None
+        self._ws_disconnect_alert_sent = False
+        self._orphans_alert_active = False
+        self._last_orphan_alert_at: datetime | None = None
+        self._last_summary_at: datetime | None = None
 
     # ──────────────────────────────────────────────────────────────────
     # Arranque
@@ -203,6 +211,8 @@ class App:
             if self._cfg.dashboard_enabled:
                 await self._dash.start()
 
+            await self._notifier.start()
+
             # 10. Evento STARTUP
             await self._on_event(Event(
                 event_type = EventType.STARTUP.value,
@@ -225,6 +235,10 @@ class App:
                 log.info("Sistema listo. Monitorizando cierres de trades reales existentes...")
             else:
                 log.info("Sistema listo. Esperando señales...")
+
+            await self._notify_startup()
+            if self._notifier.enabled:
+                self._notify_task = asyncio.create_task(self._notification_loop())
 
             # 11. Bucle principal — esperar señal de parada
             await self._stop_event.wait()
@@ -309,6 +323,141 @@ class App:
                 await self._dash.broadcast_event(event)
             except Exception:
                 pass
+
+        if event.event_type == EventType.ERROR.value:
+            await self._notify_error_event(event)
+
+    async def _safe_notify(self, title: str, lines: list[str] | None = None) -> None:
+        try:
+            await self._notifier.send(title, lines)
+        except Exception as exc:
+            log.warning(f"No se pudo completar la notificacion: {exc}")
+
+    def _build_status_lines(self, status: dict) -> list[str]:
+        balance = status.get("balance_usdt")
+        balance_text = "n/d" if balance is None else f"{float(balance):.2f} USDT"
+        return [
+            f"instancia: {self._cfg.instance_name}",
+            f"modo: {self._cfg.mode} | paper={self._cfg.paper_trading} | solo_cerrando_real={self._cfg.real_trading_solo_cerrando}",
+            (
+                "reales abiertos: "
+                f"{status.get('open_trades_real', 0)} | paper abiertos: {status.get('open_trades_paper', 0)}"
+            ),
+            (
+                "PnL real hoy/total: "
+                f"{status.get('pnl_today_usdt', 0.0):.4f} / {status.get('pnl_total_usdt', 0.0):.4f} USDT"
+            ),
+            (
+                "PnL paper hoy/total: "
+                f"{status.get('paper_pnl_today_usdt', 0.0):.4f} / {status.get('paper_pnl_total_usdt', 0.0):.4f} USDT"
+            ),
+            f"huérfanas Binance: {status.get('orphan_count', 0)}",
+            f"WS Binance: {'OK' if status.get('ws_binance_connected') else 'DOWN'}",
+            f"balance USDT: {balance_text}",
+        ]
+
+    async def _notify_startup(self) -> None:
+        if not (self._notifier.enabled and self._cfg.notify_startup):
+            return
+        status = await self._engine_status()
+        lines = [
+            f"versiones: app={APP_VERSION} | notifier={NOTIFIER_VERSION}",
+            f"instancia configurada: {self._cfg.instance_name}",
+        ]
+        lines.extend(self._build_status_lines(status))
+        if self._cfg.startup_warnings:
+            lines.append(f"warnings de arranque: {len(self._cfg.startup_warnings)}")
+        await self._safe_notify("gestiona_trades arrancado", lines)
+        self._last_summary_at = datetime.now(timezone.utc)
+
+    async def _notify_error_event(self, event: Event) -> None:
+        if not (self._notifier.enabled and self._cfg.notify_errors):
+            return
+        details = event.details or {}
+        lines = []
+        if event.trade_id:
+            lines.append(f"trade_id: {event.trade_id}")
+        if details:
+            for key in ("pair", "symbol", "reason", "message", "error", "status"):
+                value = details.get(key)
+                if value not in (None, ""):
+                    lines.append(f"{key}: {value}")
+            if not lines:
+                lines.append(f"details: {details}")
+        await self._safe_notify("ERROR en gestiona_trades", lines)
+
+    async def _notification_loop(self) -> None:
+        interval = self._cfg.notify_health_check_interval_seconds
+        while not self._stop_event.is_set():
+            try:
+                await self._run_notification_checks()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning(f"Error en el bucle de notificaciones: {exc}")
+            await asyncio.sleep(interval)
+
+    async def _run_notification_checks(self) -> None:
+        if not self._notifier.enabled:
+            return
+
+        status = await self._engine_status()
+        now = datetime.now(timezone.utc)
+
+        ws_connected = bool(status.get("ws_binance_connected"))
+        if ws_connected:
+            if self._ws_disconnect_alert_sent and self._cfg.notify_ws_disconnect:
+                await self._safe_notify(
+                    "WS Binance recuperado",
+                    self._build_status_lines(status),
+                )
+            self._ws_disconnected_since = None
+            self._ws_disconnect_alert_sent = False
+        else:
+            if self._ws_disconnected_since is None:
+                self._ws_disconnected_since = now
+            grace = timedelta(minutes=self._cfg.notify_ws_disconnect_grace_minutes)
+            if (
+                self._cfg.notify_ws_disconnect
+                and not self._ws_disconnect_alert_sent
+                and now - self._ws_disconnected_since >= grace
+            ):
+                elapsed_minutes = int((now - self._ws_disconnected_since).total_seconds() // 60)
+                lines = [f"tiempo desconectado: {elapsed_minutes} min"]
+                lines.extend(self._build_status_lines(status))
+                await self._safe_notify("WS Binance desconectado", lines)
+                self._ws_disconnect_alert_sent = True
+
+        orphan_count = int(status.get("orphan_count", 0) or 0)
+        if orphan_count <= 0:
+            if self._orphans_alert_active and self._cfg.notify_orphans:
+                await self._safe_notify("Huérfanas Binance resueltas", self._build_status_lines(status))
+            self._orphans_alert_active = False
+            self._last_orphan_alert_at = None
+        else:
+            repeat_delta = timedelta(minutes=self._cfg.notify_orphan_repeat_minutes)
+            should_repeat = (
+                self._last_orphan_alert_at is None
+                or now - self._last_orphan_alert_at >= repeat_delta
+            )
+            if self._cfg.notify_orphans and (not self._orphans_alert_active or should_repeat):
+                lines = [f"posiciones huérfanas detectadas: {orphan_count}"]
+                orphan_positions = status.get("orphan_positions") or []
+                for orphan in orphan_positions[:5]:
+                    pair = orphan.get("pair", "desconocido")
+                    qty = orphan.get("position_amt", 0)
+                    lines.append(f"{pair}: qty={qty}")
+                lines.extend(self._build_status_lines(status))
+                await self._safe_notify("Huérfanas Binance detectadas", lines)
+                self._orphans_alert_active = True
+                self._last_orphan_alert_at = now
+
+        summary_minutes = self._cfg.notify_summary_interval_minutes
+        if self._cfg.notify_summary and summary_minutes > 0:
+            summary_delta = timedelta(minutes=summary_minutes)
+            if self._last_summary_at is None or now - self._last_summary_at >= summary_delta:
+                await self._safe_notify("Resumen gestiona_trades", self._build_status_lines(status))
+                self._last_summary_at = now
 
     # ──────────────────────────────────────────────────────────────────
     # engine_status para el dashboard
@@ -639,6 +788,20 @@ class App:
             except Exception:
                 pass
 
+        if self._notifier.enabled and self._cfg.notify_shutdown:
+            try:
+                status = await self._engine_status()
+                await self._safe_notify("gestiona_trades detenido", self._build_status_lines(status))
+            except Exception as exc:
+                log.warning(f"No se pudo enviar notificacion de apagado: {exc}")
+
+        if self._notify_task:
+            self._notify_task.cancel()
+            try:
+                await self._notify_task
+            except asyncio.CancelledError:
+                pass
+
         # 1. SignalWatcher: no más señales
         if self._watcher:
             await self._watcher.stop()
@@ -674,6 +837,8 @@ class App:
         # 6. DB
         if self._db:
             await self._db.close()
+
+        await self._notifier.stop()
 
         log.info("Apagado completo.")
 
@@ -729,6 +894,16 @@ async def _main():
         sys.exit(e.code)
     except Exception as e:
         log.critical(f"Error fatal no controlado: {e}", exc_info=True)
+        try:
+            await app._safe_notify(
+                "Error fatal en gestiona_trades",
+                [
+                    f"instancia: {cfg.instance_name}",
+                    f"error: {e}",
+                ],
+            )
+        except Exception:
+            pass
         sys.exit(1)
 
 

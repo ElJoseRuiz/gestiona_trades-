@@ -37,7 +37,7 @@ Lee señales de trading desde un archivo CSV generado por `selecciona_pares.py`,
 gestiona_trades/
 ├── gestiona_trades.py           # Punto de entrada principal (clase App)
 ├── requirements.txt             # Dependencias Python
-├── config.yaml.example          # Plantilla de configuración (copiar a config.yaml)
+├── config.example.yaml          # Plantilla de configuración (copiar a config.yaml)
 ├── GUIA.md                      # Documentación completa en español
 ├── estrategia/
 │   └── filtros_gestiona_trades.yaml   # Perfil exportado por el dashboard de optimizacion
@@ -95,7 +95,7 @@ source .venv/bin/activate        # Linux/macOS
 pip install -r requirements.txt
 
 # Copiar y editar la configuración
-cp config.yaml.example config.yaml
+cp config.example.yaml config.yaml
 # Editar config.yaml con API keys y parámetros de estrategia
 
 # Ejecutar
@@ -107,7 +107,7 @@ python gestiona_trades.py --config /ruta/a/config.yaml
 
 ## Configuración (`config.yaml`)
 
-El archivo `config.yaml` **nunca se debe commitear** (está en `.gitignore`). Usar `config.yaml.example` como plantilla.
+El archivo `config.yaml` **nunca se debe commitear** (está en `.gitignore`). Usar `config.example.yaml` como plantilla.
 
 ### Secciones principales
 
@@ -214,7 +214,7 @@ Campos de `filtros_entrada` a priorizar en primera fase:
 - `bp_min`, `bp_max`
 - `quintiles`
 - `categorias`
-- `filtro_overlap`
+- `filtro_excluir_overlap`
 - `gestion_trade.sl_pos`, `gestion_trade.tp_pos`
 - `gestion_trade.global_tp`, `gestion_trade.global_tp_win`
 
