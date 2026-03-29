@@ -56,7 +56,7 @@ from src.state         import StateDB
 from src.trade_engine  import TradeEngine
 from src.ws_manager    import WSManager
 
-APP_VERSION = "0.21"
+APP_VERSION = "0.22"
 
 log = get_logger("main")
 
@@ -333,9 +333,10 @@ class App:
         except Exception as exc:
             log.warning(f"No se pudo completar la notificacion: {exc}")
 
-    def _build_status_lines(self, status: dict) -> list[str]:
+    async def _build_status_lines(self, status: dict) -> list[str]:
         balance = status.get("balance_usdt")
         balance_text = "n/d" if balance is None else f"{float(balance):.2f} USDT"
+        unrealized_real, unrealized_paper = await self._get_control_mision_unrealized_pnl()
         return [
             f"instancia: {self._cfg.instance_name}",
             f"modo: {self._cfg.mode} | paper={self._cfg.paper_trading} | solo_cerrando_real={self._cfg.real_trading_solo_cerrando}",
@@ -343,6 +344,7 @@ class App:
                 "reales abiertos: "
                 f"{status.get('open_trades_real', 0)} | paper abiertos: {status.get('open_trades_paper', 0)}"
             ),
+            f"Unrealized PnL Real / Paper: {unrealized_real:.4f} / {unrealized_paper:.4f} USDT",
             (
                 "PnL real hoy/total: "
                 f"{status.get('pnl_today_usdt', 0.0):.4f} / {status.get('pnl_total_usdt', 0.0):.4f} USDT"
@@ -356,6 +358,59 @@ class App:
             f"balance USDT: {balance_text}",
         ]
 
+    async def _get_control_mision_unrealized_pnl(self) -> tuple[float, float]:
+        """
+        Replica la base de calculo de control_mision:
+        - toma trades activos reales y paper
+        - usa mark prices del endpoint premiumIndex
+        - asume SHORT, igual que la operativa actual del bot
+        """
+        if not self._db or not self._om:
+            return 0.0, 0.0
+
+        try:
+            real_trades, paper_trades = await asyncio.gather(
+                self._db.load_active_trades(),
+                self._db.load_active_paper_trades(),
+            )
+        except Exception as exc:
+            log.warning(f"No se pudieron cargar trades activos para unrealized PnL: {exc}")
+            return 0.0, 0.0
+
+        try:
+            items = await self._om._get("/fapi/v1/premiumIndex")
+        except Exception as exc:
+            log.warning(f"No se pudieron cargar mark prices para unrealized PnL: {exc}")
+            return 0.0, 0.0
+
+        mark_prices: dict[str, float] = {}
+        if isinstance(items, list):
+            for item in items:
+                symbol = str(item.get("symbol") or "").strip()
+                if not symbol:
+                    continue
+                try:
+                    mark_prices[symbol] = float(item.get("markPrice", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+
+        def _sum_unrealized(trades: list[Trade]) -> float:
+            total = 0.0
+            for trade in trades:
+                if not trade.pair or trade.entry_price is None or trade.entry_quantity is None:
+                    continue
+                mark_price = mark_prices.get(trade.pair)
+                if mark_price is None:
+                    continue
+                entry_price = float(trade.entry_price or 0)
+                quantity = float(trade.entry_quantity or 0)
+                if entry_price <= 0 or quantity <= 0:
+                    continue
+                total += (entry_price - mark_price) * quantity
+            return round(total, 4)
+
+        return _sum_unrealized(real_trades), _sum_unrealized(paper_trades)
+
     async def _notify_startup(self) -> None:
         if not (self._notifier.enabled and self._cfg.notify_startup):
             return
@@ -364,7 +419,7 @@ class App:
             f"versiones: app={APP_VERSION} | notifier={NOTIFIER_VERSION}",
             f"instancia configurada: {self._cfg.instance_name}",
         ]
-        lines.extend(self._build_status_lines(status))
+        lines.extend(await self._build_status_lines(status))
         if self._cfg.startup_warnings:
             lines.append(f"warnings de arranque: {len(self._cfg.startup_warnings)}")
         await self._safe_notify("gestiona_trades arrancado", lines)
@@ -409,7 +464,7 @@ class App:
             if self._ws_disconnect_alert_sent and self._cfg.notify_ws_disconnect:
                 await self._safe_notify(
                     "WS Binance recuperado",
-                    self._build_status_lines(status),
+                    await self._build_status_lines(status),
                 )
             self._ws_disconnected_since = None
             self._ws_disconnect_alert_sent = False
@@ -424,14 +479,14 @@ class App:
             ):
                 elapsed_minutes = int((now - self._ws_disconnected_since).total_seconds() // 60)
                 lines = [f"tiempo desconectado: {elapsed_minutes} min"]
-                lines.extend(self._build_status_lines(status))
+                lines.extend(await self._build_status_lines(status))
                 await self._safe_notify("WS Binance desconectado", lines)
                 self._ws_disconnect_alert_sent = True
 
         orphan_count = int(status.get("orphan_count", 0) or 0)
         if orphan_count <= 0:
             if self._orphans_alert_active and self._cfg.notify_orphans:
-                await self._safe_notify("Huérfanas Binance resueltas", self._build_status_lines(status))
+                await self._safe_notify("Huérfanas Binance resueltas", await self._build_status_lines(status))
             self._orphans_alert_active = False
             self._last_orphan_alert_at = None
         else:
@@ -447,7 +502,7 @@ class App:
                     pair = orphan.get("pair", "desconocido")
                     qty = orphan.get("position_amt", 0)
                     lines.append(f"{pair}: qty={qty}")
-                lines.extend(self._build_status_lines(status))
+                lines.extend(await self._build_status_lines(status))
                 await self._safe_notify("Huérfanas Binance detectadas", lines)
                 self._orphans_alert_active = True
                 self._last_orphan_alert_at = now
@@ -456,7 +511,7 @@ class App:
         if self._cfg.notify_summary and summary_minutes > 0:
             summary_delta = timedelta(minutes=summary_minutes)
             if self._last_summary_at is None or now - self._last_summary_at >= summary_delta:
-                await self._safe_notify("Resumen gestiona_trades", self._build_status_lines(status))
+                await self._safe_notify("Resumen gestiona_trades", await self._build_status_lines(status))
                 self._last_summary_at = now
 
     # ──────────────────────────────────────────────────────────────────
@@ -791,7 +846,7 @@ class App:
         if self._notifier.enabled and self._cfg.notify_shutdown:
             try:
                 status = await self._engine_status()
-                await self._safe_notify("gestiona_trades detenido", self._build_status_lines(status))
+                await self._safe_notify("gestiona_trades detenido", await self._build_status_lines(status))
             except Exception as exc:
                 log.warning(f"No se pudo enviar notificacion de apagado: {exc}")
 

@@ -358,8 +358,19 @@ Modos:
 El bot espera un CSV compatible con columnas equivalentes a:
 
 ```csv
-fecha_hora,par,rank,close,mom_pct,vol_ratio,trades_ratio,quintil,bp,categoria,leido
+fecha_hora,par,rank,close,mom_pct,vol_ratio,trades_ratio,quintil,bp,categoria
 ```
+
+El watcher ya no usa la columna `leido`. Cada instancia mantiene su propio cursor local en
+`signals.cursor_path`, lo que permite que varias instancias lean el mismo CSV, por ejemplo una
+en paper y otra en real, sin consumirse entre si.
+
+En este funcionamiento:
+
+- `max_signal_age_minutes` sigue aplicando para descartar señales demasiado antiguas
+- el CSV fuente no se modifica
+- cada instancia debe tener su propio `database.path`, su propio `signals.cursor_path` y su propio `dashboard.port`
+- si no existe cursor previo y `signals.cursor_start_at_end: true`, la primera ejecución solo salta al final cuando el CSV que ya existe es backlog viejo; si la señal más reciente sigue dentro de `max_signal_age_minutes`, se procesa normalmente
 
 Si un filtro activo necesita un campo y la señal no lo trae, la señal debe rechazarse.
 

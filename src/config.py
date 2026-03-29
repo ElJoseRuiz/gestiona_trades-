@@ -15,7 +15,7 @@ from .filtros_gestiona_trades import (
     load_filtros_gestiona_trades,
 )
 
-CONFIG_VERSION = "0.17"
+CONFIG_VERSION = "0.19"
 
 
 class Config:
@@ -333,6 +333,24 @@ class Config:
     def poll_interval_seconds(self)      -> float: return float(self._get("signals", "poll_interval_seconds",  default=15))
     @property
     def max_signal_age_minutes(self)     -> float: return float(self._get("signals", "max_signal_age_minutes", default=10))
+
+    @property
+    def signal_cursor_path(self) -> str:
+        configured = self._get("signals", "cursor_path", default="")
+        if configured:
+            return str(configured)
+
+        db_path = Path(self.db_path)
+        if db_path.suffix:
+            return str(db_path.with_suffix(".signal_cursor.json"))
+        return str(db_path.parent / f"{db_path.name}.signal_cursor.json")
+
+    @property
+    def signal_cursor_start_at_end(self) -> bool:
+        return self._as_bool(
+            self._get("signals", "cursor_start_at_end", default=True),
+            default=True,
+        )
 
     @property
     def signal_rank_min(self) -> int | None:
