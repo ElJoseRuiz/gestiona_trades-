@@ -8,24 +8,24 @@ Manejo del CSV:
   - Alias tolerantes de columnas para acompanar la integracion con el dashboard
 
 Logica:
-  - Procesa solo filas con leido=="no"
-  - Senales con antiguedad > max_signal_age_minutes -> marca "timeout"
+  - No toca el CSV de senales; cada instancia recuerda su propio cursor local
+  - Senales con antiguedad > max_signal_age_minutes se descartan
   - Senales validas -> aplica filtros de la config -> emite al trade engine
-  - Marca "si" (procesada) o "timeout" incluso si se descarta por filtros
 """
 from __future__ import annotations
 
 import asyncio
 import csv
+import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, List, Optional, Tuple
 
 from .config import Config
 from .logger import get_logger
 from .models import Signal
 
-COMPONENT_VERSION = "0.12"
+COMPONENT_VERSION = "0.14"
 
 log = get_logger("signal_watcher")
 
@@ -38,12 +38,16 @@ class SignalWatcher:
         self._on_signal = on_signal
         self._task: Optional[asyncio.Task] = None
         self._last_mtime: float = 0.0
+        self._cursor_path = Path(self._cfg.signal_cursor_path)
+        self._cursor_state = _empty_cursor_state()
+        self._cursor_loaded = False
 
     async def start(self):
+        self._load_cursor_state()
         self._task = asyncio.create_task(self._poll_loop(), name="signal_watcher")
         log.info(
             f"SignalWatcher iniciado -> {self._cfg.signals_file_path} "
-            f"(poll cada {self._cfg.poll_interval_seconds}s)"
+            f"(poll cada {self._cfg.poll_interval_seconds}s, modo=cursor_local_compartido)"
         )
 
     async def stop(self):
@@ -75,10 +79,21 @@ class SignalWatcher:
             return
         self._last_mtime = mtime
 
-        signals, updates = self._read_and_filter(path)
+        try:
+            rows = _read_csv(path)
+        except Exception as exc:
+            log.error(f"Error leyendo CSV {path}: {exc}")
+            return
 
-        if updates:
-            await asyncio.get_event_loop().run_in_executor(None, _update_csv, path, updates)
+        if self._should_bootstrap_cursor(rows):
+            self._bootstrap_cursor(rows)
+            self._save_cursor_state()
+            return
+
+        signals, cursor_changed = self._read_and_filter(rows)
+
+        if cursor_changed:
+            await asyncio.get_event_loop().run_in_executor(None, self._save_cursor_state)
 
         for sig in signals:
             try:
@@ -86,50 +101,35 @@ class SignalWatcher:
             except Exception as exc:
                 log.error(f"Error procesando senal {sig.pair}: {exc}", exc_info=True)
 
-    def _read_and_filter(self, path: Path) -> Tuple[List[Signal], dict]:
+    def _read_and_filter(self, rows: List[dict]) -> Tuple[List[Signal], bool]:
         """
-        Devuelve (senales_validas, {(fecha_hora, par, rank): nuevo_leido}).
+        Devuelve (senales_validas, cursor_changed).
         """
         now = datetime.now(timezone.utc)
         signals: List[Signal] = []
-        updates: dict = {}
-
-        try:
-            rows = _read_csv(path)
-        except Exception as exc:
-            log.error(f"Error leyendo CSV {path}: {exc}")
-            return [], {}
+        consumed_cursor_rows: List[tuple[datetime, tuple[str, str, str]]] = []
 
         for row in rows:
-            leido = _get_row_value(row, "leido", default="").strip().lower()
-            if leido != "no":
-                continue
-
             fecha_hora = _get_row_value(row, "fecha_hora", "timestamp", "signal_ts", default="").strip()
             par = _get_row_value(row, "par", "pair", default="").strip()
             rank_raw = _get_row_value(row, "rank", "top", default="").strip()
             key = (fecha_hora, par, rank_raw)
 
-            if not fecha_hora:
-                log.warning("Senal descartada: falta timestamp (fecha_hora/timestamp/signal_ts)")
-                updates[key] = "si"
-                continue
-            if not par:
-                log.warning("Senal descartada: falta par (par/pair)")
-                updates[key] = "si"
-                continue
-            if not rank_raw:
-                log.warning(f"Senal {par} descartada: falta rank/top")
-                updates[key] = "si"
+            if not fecha_hora or not par or not rank_raw:
+                log.warning(
+                    "Senal descartada: falta fecha_hora/par/rank y no se puede "
+                    "avanzar el cursor de forma segura"
+                )
                 continue
 
-            try:
-                sig_dt = datetime.strptime(fecha_hora, "%Y/%m/%d %H:%M:%S")
-                sig_dt = sig_dt.replace(tzinfo=timezone.utc)
-            except ValueError:
+            sig_dt = _parse_signal_datetime(fecha_hora)
+            if sig_dt is None:
                 log.warning(f"Timestamp invalido en senal: '{fecha_hora}'")
-                updates[key] = "si"
                 continue
+
+            if not self._is_cursor_candidate(sig_dt, key):
+                continue
+            consumed_cursor_rows.append((sig_dt, key))
 
             age_min = (now - sig_dt).total_seconds() / 60
             if age_min > self._cfg.max_signal_age_minutes:
@@ -137,14 +137,12 @@ class SignalWatcher:
                     f"Senal expirada ({age_min:.1f}min > {self._cfg.max_signal_age_minutes}min): "
                     f"{par} -> timeout"
                 )
-                updates[key] = "timeout"
                 continue
 
             try:
                 top = int(float(rank_raw))
             except ValueError:
                 log.warning(f"Senal {par} descartada: rank/top invalido '{rank_raw}'")
-                updates[key] = "si"
                 continue
 
             momentum_raw = _get_row_value(row, "momentum", "mom_pct", "mom_1h_pct", default="")
@@ -166,13 +164,11 @@ class SignalWatcher:
                 )
             except (ValueError, TypeError) as exc:
                 log.warning(f"Error parseando senal {par}: {exc}")
-                updates[key] = "si"
                 continue
 
             reject_reason = self._apply_filters(sig)
             if reject_reason:
                 log.info(f"Senal {par} descartada ({reject_reason})")
-                updates[key] = "si"
                 continue
 
             log.info(
@@ -183,9 +179,120 @@ class SignalWatcher:
                 f"bp={_fmt_metric(sig.bp, 4)}"
             )
             signals.append(sig)
-            updates[key] = "si"
 
-        return signals, updates
+        cursor_changed = self._advance_cursor(consumed_cursor_rows)
+        return signals, cursor_changed
+
+    def _load_cursor_state(self):
+        self._cursor_loaded = True
+        if not self._cursor_path.exists():
+            self._cursor_state = _empty_cursor_state()
+            return
+
+        try:
+            payload = json.loads(self._cursor_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning(f"No se pudo cargar cursor de senales {self._cursor_path}: {exc}")
+            self._cursor_state = _empty_cursor_state()
+            return
+
+        self._cursor_state = {
+            "last_timestamp": payload.get("last_timestamp"),
+            "last_keys_at_timestamp": list(payload.get("last_keys_at_timestamp", [])),
+        }
+
+    def _save_cursor_state(self):
+        self._cursor_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self._cursor_path.with_suffix(f"{self._cursor_path.suffix}.tmp")
+        tmp_path.write_text(
+            json.dumps(self._cursor_state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp_path.replace(self._cursor_path)
+
+    def _should_bootstrap_cursor(self, rows: List[dict]) -> bool:
+        if not self._cursor_loaded:
+            self._load_cursor_state()
+        if not self._cfg.signal_cursor_start_at_end:
+            return False
+        if self._cursor_state.get("last_timestamp"):
+            return False
+
+        latest_dt = _latest_cursor_timestamp(rows)
+        if latest_dt is None:
+            return False
+
+        age_min = (datetime.now(timezone.utc) - latest_dt).total_seconds() / 60
+        return age_min > self._cfg.max_signal_age_minutes
+
+    def _bootstrap_cursor(self, rows: List[dict]):
+        latest_dt: Optional[datetime] = None
+        latest_keys: set[str] = set()
+
+        for row in rows:
+            parsed = _parse_row_cursor_meta(row)
+            if parsed is None:
+                continue
+            sig_dt, key = parsed
+            serialized_key = _serialize_signal_key(key)
+            if latest_dt is None or sig_dt > latest_dt:
+                latest_dt = sig_dt
+                latest_keys = {serialized_key}
+            elif sig_dt == latest_dt:
+                latest_keys.add(serialized_key)
+
+        if latest_dt is None:
+            self._cursor_state = _empty_cursor_state()
+            log.info(
+                "Modo compartido activado sin cursor previo; el CSV no tiene filas validas "
+                "para inicializar el cursor."
+            )
+            return
+
+        self._cursor_state = {
+            "last_timestamp": latest_dt.isoformat(),
+            "last_keys_at_timestamp": sorted(latest_keys),
+        }
+        log.info(
+            "Modo compartido activado sin cursor previo; se inicializa al final del CSV "
+            f"en {latest_dt.isoformat()} para no reprocesar backlog."
+        )
+
+    def _is_cursor_candidate(self, sig_dt: datetime, key: tuple[str, str, str]) -> bool:
+        last_dt = _cursor_timestamp_to_datetime(self._cursor_state.get("last_timestamp"))
+        if last_dt is None:
+            return True
+        if sig_dt > last_dt:
+            return True
+        if sig_dt < last_dt:
+            return False
+        seen_keys = set(self._cursor_state.get("last_keys_at_timestamp", []))
+        return _serialize_signal_key(key) not in seen_keys
+
+    def _advance_cursor(self, consumed_rows: List[tuple[datetime, tuple[str, str, str]]]) -> bool:
+        if not consumed_rows:
+            return False
+
+        last_dt = _cursor_timestamp_to_datetime(self._cursor_state.get("last_timestamp"))
+        latest_dt = max(sig_dt for sig_dt, _ in consumed_rows)
+        latest_keys = {
+            _serialize_signal_key(key)
+            for sig_dt, key in consumed_rows
+            if sig_dt == latest_dt
+        }
+
+        if last_dt is not None and latest_dt == last_dt:
+            latest_keys.update(self._cursor_state.get("last_keys_at_timestamp", []))
+
+        new_state = {
+            "last_timestamp": latest_dt.isoformat(),
+            "last_keys_at_timestamp": sorted(latest_keys),
+        }
+        if new_state == self._cursor_state:
+            return False
+
+        self._cursor_state = new_state
+        return True
 
     def _apply_filters(self, sig: Signal) -> Optional[str]:
         """Devuelve el motivo de rechazo, o None si pasa todos los filtros."""
@@ -286,6 +393,60 @@ def _parse_opt_int(raw: str) -> Optional[int]:
     return int(float(s)) if s else None
 
 
+def _parse_signal_datetime(raw: str) -> Optional[datetime]:
+    try:
+        return datetime.strptime(raw, "%Y/%m/%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _parse_row_cursor_meta(row: dict) -> Optional[tuple[datetime, tuple[str, str, str]]]:
+    fecha_hora = _get_row_value(row, "fecha_hora", "timestamp", "signal_ts", default="").strip()
+    par = _get_row_value(row, "par", "pair", default="").strip()
+    rank_raw = _get_row_value(row, "rank", "top", default="").strip()
+    if not fecha_hora or not par or not rank_raw:
+        return None
+    sig_dt = _parse_signal_datetime(fecha_hora)
+    if sig_dt is None:
+        return None
+    return sig_dt, (fecha_hora, par, rank_raw)
+
+
+def _latest_cursor_timestamp(rows: List[dict]) -> Optional[datetime]:
+    latest_dt: Optional[datetime] = None
+    for row in rows:
+        parsed = _parse_row_cursor_meta(row)
+        if parsed is None:
+            continue
+        sig_dt, _ = parsed
+        if latest_dt is None or sig_dt > latest_dt:
+            latest_dt = sig_dt
+    return latest_dt
+
+
+def _serialize_signal_key(key: tuple[str, str, str]) -> str:
+    return "|".join(key)
+
+
+def _empty_cursor_state() -> dict[str, Any]:
+    return {
+        "last_timestamp": None,
+        "last_keys_at_timestamp": [],
+    }
+
+
+def _cursor_timestamp_to_datetime(raw: Any) -> Optional[datetime]:
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _get_row_value(row: dict, *names: str, default: str = "") -> str:
     for name in names:
         value = row.get(name)
@@ -360,78 +521,3 @@ def _read_csv(path: Path) -> List[dict]:
     return rows
 
 
-def _detect_csv_newline(text: str) -> str:
-    """
-    Detecta el separador de linea preferido del CSV.
-    Si el fichero ya viene corrupto con '\r' sueltos, lo normaliza a CRLF.
-    """
-    if "\r\n" in text:
-        return "\r\n"
-    if "\n" in text:
-        return "\n"
-    if "\r" in text:
-        return "\r\n"
-    return "\n"
-
-
-def _update_csv(path: Path, updates: dict) -> None:
-    """
-    Actualiza la columna 'leido' de las filas indicadas.
-    updates = {(fecha_hora, par, rank_str): new_value}
-    Escritura atomica via fichero temporal.
-    """
-    try:
-        content = path.read_bytes()
-        encoding = "utf-8-sig" if content.startswith(b"\xef\xbb\xbf") else "utf-8"
-        text = content.decode(encoding)
-        newline_style = _detect_csv_newline(text)
-        lines = text.splitlines()
-
-        if not lines:
-            return
-
-        non_blank_lines = [line for line in lines if line.strip()]
-        if not non_blank_lines:
-            return
-
-        header_line = non_blank_lines[0].strip()
-        sep = ","
-        headers = [h.strip() for h in header_line.split(sep)]
-        try:
-            leido_idx = headers.index("leido")
-        except ValueError:
-            log.warning("Columna 'leido' no encontrada en CSV, no se puede actualizar")
-            return
-
-        # Reescribimos el fichero sin lineas vacias para impedir la acumulacion
-        # de saltos de linea corruptos al marcar la columna "leido".
-        new_lines = [header_line + newline_style]
-        for line in non_blank_lines[1:]:
-            stripped = line.strip()
-            parts = stripped.split(sep)
-
-            try:
-                key = (
-                    parts[headers.index("fecha_hora")].strip() if "fecha_hora" in headers else "",
-                    parts[headers.index("par")].strip() if "par" in headers else "",
-                    parts[headers.index("rank")].strip() if "rank" in headers else (
-                        parts[headers.index("top")].strip() if "top" in headers else ""
-                    ),
-                )
-            except IndexError:
-                new_lines.append(stripped + newline_style)
-                continue
-
-            if key in updates and leido_idx < len(parts):
-                parts[leido_idx] = updates[key]
-                new_lines.append(sep.join(parts) + newline_style)
-            else:
-                new_lines.append(stripped + newline_style)
-
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text("".join(new_lines), encoding=encoding, newline="")
-        tmp.replace(path)
-        log.debug(f"CSV actualizado: {len(updates)} filas marcadas")
-
-    except Exception as exc:
-        log.error(f"Error actualizando CSV {path}: {exc}", exc_info=True)

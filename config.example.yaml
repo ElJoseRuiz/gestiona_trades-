@@ -33,7 +33,11 @@ signals:
   poll_interval_seconds: 15                     # Cada cuántos segundos se revisa si el CSV cambió.
   max_signal_age_minutes: 10                    # Antigüedad máxima aceptada para una señal antes de marcarla como timeout.
   # Formato mínimo recomendado del CSV:
-  # fecha_hora,par,rank,close,mom_pct,vol_ratio,trades_ratio,quintil,bp,categoria,leido
+  # fecha_hora,par,rank,close,mom_pct,vol_ratio,trades_ratio,quintil,bp,categoria
+
+  cursor_path: ""                               # Opcional. Ruta del cursor local de esta instancia. Si va vacia, se deriva de database.path.
+  cursor_start_at_end: true                     # Si no hay cursor previo y el CSV actual es backlog viejo, la instancia arranca desde el final.
+  # La columna leido ya no se usa.
 
 entry:
   order_type: "BBO"                             # hoy el flujo real está cableado como chase BBO + fallback MARKET.
