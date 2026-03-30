@@ -15,7 +15,7 @@ import aiohttp
 from .config import Config
 from .logger import get_logger
 
-NOTIFIER_VERSION = "0.11"
+NOTIFIER_VERSION = "0.12"
 
 log = get_logger("notifier")
 
@@ -108,7 +108,10 @@ class Notifier:
     async def send(self, title: str, lines: list[str] | None = None) -> bool:
         if not self.enabled:
             return False
-        body = [title.strip()]
+        body: list[str] = []
+        title_text = title.strip()
+        if title_text:
+            body.append(title_text)
         for line in lines or []:
             clean = str(line).strip()
             if clean:
