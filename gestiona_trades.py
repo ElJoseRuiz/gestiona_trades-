@@ -56,7 +56,7 @@ from src.state         import StateDB
 from src.trade_engine  import TradeEngine
 from src.ws_manager    import WSManager
 
-APP_VERSION = "0.23"
+APP_VERSION = "0.24"
 
 log = get_logger("main")
 
@@ -356,7 +356,7 @@ class App:
                 "PnL real hoy/total: "
                 f"{status.get('pnl_today_usdt', 0.0):.4f} / {status.get('pnl_total_usdt', 0.0):.4f} USDT"
             ),
-            f"huérfanas Binance: {status.get('orphan_count', 0)}",
+            *([f"huérfanas Binance: {status.get('orphan_count', 0)}"] if self._cfg.notify_orphans else []),
             f"WS Binance: {'OK' if status.get('ws_binance_connected') else 'DOWN'}",
             f"balance USDT: {balance_text}",
         ]
