@@ -48,6 +48,7 @@ Si `python` no está en el `PATH`, usa `py -3` en su lugar.
 
 ```powershell
 cd C:\ruta\al\repo\gestiona_trades
+mejor en disco loal que en dropbox cd C:\venvs\gestiona_trades
 python -m venv .venv
 ```
 
@@ -55,13 +56,13 @@ python -m venv .venv
 
 Si PowerShell bloquea la activación, habilita scripts locales una vez:
 
-```powershell
+```powershell 
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
 Después:
 
-```powershell
+```powershell en C:\venvs\gestiona_trades>
 .venv\Scripts\Activate.ps1
 ```
 

@@ -56,7 +56,7 @@ from src.state         import StateDB
 from src.trade_engine  import TradeEngine
 from src.ws_manager    import WSManager
 
-APP_VERSION = "0.22"
+APP_VERSION = "0.23"
 
 log = get_logger("main")
 
@@ -337,21 +337,24 @@ class App:
         balance = status.get("balance_usdt")
         balance_text = "n/d" if balance is None else f"{float(balance):.2f} USDT"
         unrealized_real, unrealized_paper = await self._get_control_mision_unrealized_pnl()
+        if self._cfg.paper_trading:
+            return [
+                f"instancia: {self._cfg.instance_name}",
+                f"paper abiertos: {status.get('open_trades_paper', 0)}",
+                f"Unrealized PnL Paper: {unrealized_paper:.4f} USDT",
+                (
+                    "PnL paper hoy/total: "
+                    f"{status.get('paper_pnl_today_usdt', 0.0):.4f} / {status.get('paper_pnl_total_usdt', 0.0):.4f} USDT"
+                ),
+                f"WS Binance: {'OK' if status.get('ws_binance_connected') else 'DOWN'}",
+            ]
         return [
             f"instancia: {self._cfg.instance_name}",
-            f"modo: {self._cfg.mode} | paper={self._cfg.paper_trading} | solo_cerrando_real={self._cfg.real_trading_solo_cerrando}",
-            (
-                "reales abiertos: "
-                f"{status.get('open_trades_real', 0)} | paper abiertos: {status.get('open_trades_paper', 0)}"
-            ),
-            f"Unrealized PnL Real / Paper: {unrealized_real:.4f} / {unrealized_paper:.4f} USDT",
+            f"reales abiertos: {status.get('open_trades_real', 0)}",
+            f"Unrealized PnL Real: {unrealized_real:.4f} USDT",
             (
                 "PnL real hoy/total: "
                 f"{status.get('pnl_today_usdt', 0.0):.4f} / {status.get('pnl_total_usdt', 0.0):.4f} USDT"
-            ),
-            (
-                "PnL paper hoy/total: "
-                f"{status.get('paper_pnl_today_usdt', 0.0):.4f} / {status.get('paper_pnl_total_usdt', 0.0):.4f} USDT"
             ),
             f"huérfanas Binance: {status.get('orphan_count', 0)}",
             f"WS Binance: {'OK' if status.get('ws_binance_connected') else 'DOWN'}",
@@ -511,7 +514,7 @@ class App:
         if self._cfg.notify_summary and summary_minutes > 0:
             summary_delta = timedelta(minutes=summary_minutes)
             if self._last_summary_at is None or now - self._last_summary_at >= summary_delta:
-                await self._safe_notify("Resumen gestiona_trades", await self._build_status_lines(status))
+                await self._safe_notify("", await self._build_status_lines(status))
                 self._last_summary_at = now
 
     # ──────────────────────────────────────────────────────────────────
