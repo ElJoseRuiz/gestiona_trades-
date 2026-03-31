@@ -408,7 +408,8 @@ async def run():
 - Mantener todos los archivos de texto en UTF-8 limpio y sin mojibake; si aparece texto mal codificado, corregirlo antes de dar la tarea por cerrada.
 - Todas las copias de seguridad, incluidas las de `AGENTS.md` y cualquier otro backup auxiliar, deben guardarse dentro de `./backups/` y no en la raíz del repositorio.
 - Cada programa o interfaz visible sigue su propia versión independiente.
-- La versión inicial de esta nueva convención puede arrancar en `0.11`.
+- A partir de esta convención, todos los programas, interfaces y componentes versionados del proyecto pasan a arrancar desde `1.00`, aunque antes llevaran otra serie.
+- Desde ese reinicio común en `1.00`, cada cambio posterior debe seguir subiendo en `+0.01`.
 - Cada cambio de código en un programa debe incrementar su propia versión en `+0.01`.
 - Flujo obligatorio para cambios de código: 1) identificar la versión actual del componente, 2) crear backup de esa versión en `./backups/`, 3) aplicar el cambio, 4) subir la versión del propio componente en `+0.01` antes de cerrar la tarea.
 - No dejar cambios de código cerrados con una versión antigua o sin actualizar respecto a la modificación realmente hecha.

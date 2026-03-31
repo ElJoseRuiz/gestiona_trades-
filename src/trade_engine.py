@@ -39,7 +39,7 @@ from .ws_manager import WSManager
 log = get_logger("trade_engine")
 
 OnEventCallback = Callable[[Event], Awaitable[None]]
-TRADE_ENGINE_VERSION = "0.12"
+TRADE_ENGINE_VERSION = "1.10"
 
 
 class TradeEngine:
@@ -67,6 +67,13 @@ class TradeEngine:
         self._reconcile_task: Optional[asyncio.Task] = None
         self._open_tasks:     set = set()   # tareas _open_trade en curso
         self._ignore_cycles:  Dict[str, dict] = {}
+        self._last_reconcile_monotonic: float | None = None
+        self._sl_retry_after: Dict[str, datetime] = {}
+        self._trades_lock = asyncio.Lock()
+        self._pair_sl_locks: Dict[str, asyncio.Lock] = {}
+        self._sl_capacity_lock = asyncio.Lock()
+        self._entry_rejected_no_sl_capacity: dict | None = None
+        self._quantitative_rules_status: dict | None = None
 
     # ──────────────────────────────────────────────────────────────────
     # Arranque / Parada
@@ -349,7 +356,7 @@ class TradeEngine:
         trade.exit_fill_ts = trade.exit_fill_ts or datetime.now(timezone.utc).isoformat()
         trade.touch()
         await self._db.save_trade(trade)
-        self._trades.pop(trade.trade_id, None)
+        await self._forget_trade(trade.trade_id)
         await self._emit(EventType.ERROR, trade.trade_id, {
             "msg": reason_msg
         })
@@ -359,21 +366,982 @@ class TradeEngine:
     # ──────────────────────────────────────────────────────────────────
 
     async def _reconcile_loop(self):
-        """Ejecuta una reconciliación periódica cada 10 minutos (600s)."""
+        """
+        Ejecuta una reconciliacion periodica cada 10 minutos y la adelanta si
+        el recuento de ordenes abiertas deja de cuadrar con 2 x trades OPEN.
+        """
+        loop = asyncio.get_running_loop()
+        self._last_reconcile_monotonic = loop.time()
         while True:
-            await asyncio.sleep(600)
+            await asyncio.sleep(60)
 
             # Validación: No interrumpir si hay tareas de entrada (chase loop)
             if self._open_tasks:
                 continue
 
             try:
-                log.info("Iniciando reconciliación periódica (10 min)...")
+                now = loop.time()
+                periodic_due = (
+                    self._last_reconcile_monotonic is None
+                    or (now - self._last_reconcile_monotonic) >= 600
+                )
+                if periodic_due:
+                    log.info("Iniciando reconciliacion periodica (10 min)...")
+                else:
+                    if not await self._has_order_count_mismatch():
+                        continue
+                    log.warning(
+                        "Iniciando reconciliacion por desajuste en el recuento "
+                        "de ordenes abiertas."
+                    )
                 await self.reconcile(self.get_active_trades())
+                self._last_reconcile_monotonic = loop.time()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 log.error(f"Error en reconcile_loop: {e}", exc_info=True)
+
+    async def _has_order_count_mismatch_legacy(self) -> bool:
+        """
+        Comprueba si Binance mantiene el nÃºmero esperado de Ã³rdenes abiertas:
+        2 por cada trade OPEN (TP + SL).
+        """
+        open_trades = [
+            t for t in self._trades.values()
+            if t.status == TradeStatus.OPEN
+        ]
+        blocked_sl_trades = sum(
+            1 for t in open_trades
+            if not t.sl_order_id and self._is_sl_retry_blocked(t)
+        )
+        expected_orders = len(open_trades) * 2 - blocked_sl_trades
+
+        try:
+            all_open = await self._order_mgr.get_all_open_orders()
+            all_algo = await self._order_mgr.get_all_open_algo_orders()
+        except Exception as e:
+            log.error(
+                f"Chequeo de recuento de Ã³rdenes: no se pudo consultar Binance: {e}",
+                exc_info=True,
+            )
+            return False
+
+        actual_orders = len(all_open) + len(all_algo)
+        if actual_orders == expected_orders:
+            log.debug(
+                "Chequeo Ã³rdenes/trades OK: Binance=%s, esperado=%s "
+                "(2 x %s trades OPEN)",
+                actual_orders,
+                expected_orders,
+                len(open_trades),
+            )
+            return False
+
+        log.warning(
+            "Chequeo Ã³rdenes/trades: Binance=%s, esperado=%s "
+            "(2 x %s trades OPEN) -> forzando reconciliaciÃ³n",
+            actual_orders,
+            expected_orders,
+            len(open_trades),
+        )
+        return True
+
+    def _is_sl_retry_blocked(self, trade: Trade) -> bool:
+        retry_after = self._sl_retry_after.get(trade.trade_id)
+        if retry_after is None:
+            return False
+        if retry_after <= datetime.now(timezone.utc):
+            self._sl_retry_after.pop(trade.trade_id, None)
+            return False
+        return True
+
+    def _set_sl_retry_block(self, trade: Trade, minutes: int = 10) -> datetime:
+        retry_after = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        self._sl_retry_after[trade.trade_id] = retry_after
+        return retry_after
+
+    def _get_sl_capacity_block_status(self) -> dict:
+        if self._entry_rejected_no_sl_capacity:
+            return {
+                "active": True,
+                "mode": "ENTRY_REJECTED_NO_SL_CAPACITY",
+                "pair": self._entry_rejected_no_sl_capacity.get("pair"),
+                "trade_id": self._entry_rejected_no_sl_capacity.get("trade_id"),
+                "retry_after": self._entry_rejected_no_sl_capacity.get("retry_after"),
+                "reason": self._entry_rejected_no_sl_capacity.get("reason"),
+            }
+
+        blocked_items: list[dict] = []
+
+        if self._cfg.sl_por_par:
+            open_pairs = {
+                t.pair for t in self._trades.values()
+                if t.status == TradeStatus.OPEN
+            }
+            for pair in open_pairs:
+                owner = self._select_sl_owner_trade(pair)
+                if owner is None or owner.sl_order_id:
+                    continue
+                if not self._is_sl_retry_blocked(owner):
+                    continue
+                blocked_items.append({
+                    "pair": pair,
+                    "trade_id": owner.trade_id,
+                    "retry_after": self._sl_retry_after.get(owner.trade_id),
+                })
+        else:
+            for trade in self._trades.values():
+                if trade.status != TradeStatus.OPEN or trade.sl_order_id:
+                    continue
+                if not self._is_sl_retry_blocked(trade):
+                    continue
+                blocked_items.append({
+                    "pair": trade.pair,
+                    "trade_id": trade.trade_id,
+                    "retry_after": self._sl_retry_after.get(trade.trade_id),
+                })
+
+        if not blocked_items:
+            return {
+                "active": False,
+                "mode": None,
+                "pair": None,
+                "trade_id": None,
+                "retry_after": None,
+                "reason": None,
+            }
+
+        blocked_items.sort(
+            key=lambda item: item["retry_after"] or datetime.max.replace(tzinfo=timezone.utc)
+        )
+        first = blocked_items[0]
+        retry_after = first["retry_after"]
+        return {
+            "active": True,
+            "mode": "ENTRY_REJECTED_NO_SL_CAPACITY",
+            "pair": first["pair"],
+            "trade_id": first["trade_id"],
+            "retry_after": retry_after.isoformat() if retry_after else None,
+            "reason": (
+                "Binance ha alcanzado el límite de órdenes condicionales. "
+                "Se rechazarán nuevas entradas que requieran un SL adicional "
+                "hasta liberar capacidad."
+            ),
+        }
+
+    def get_sl_capacity_guard_status(self) -> dict:
+        return self._get_sl_capacity_block_status()
+
+    def get_quantitative_rules_status(self) -> dict:
+        if self._quantitative_rules_status is None:
+            return {
+                "active": False,
+                "symbol": None,
+                "context": None,
+                "error_code": None,
+                "error_message": None,
+                "captured_at": None,
+                "api_update_time": None,
+                "is_locked": False,
+                "planned_recover_time": None,
+                "indicators": [],
+            }
+        return dict(self._quantitative_rules_status)
+
+    def _clear_quantitative_rules_status(self) -> None:
+        self._quantitative_rules_status = None
+
+    @staticmethod
+    def _ms_to_iso(ms_value) -> str | None:
+        try:
+            ms_int = int(ms_value)
+        except (TypeError, ValueError):
+            return None
+        if ms_int <= 0:
+            return None
+        return datetime.fromtimestamp(ms_int / 1000.0, tz=timezone.utc).isoformat()
+
+    @staticmethod
+    def _format_quantitative_indicators_for_log(indicators: list[dict]) -> str:
+        if not indicators:
+            return ""
+
+        parts: list[str] = []
+        for item in indicators:
+            indicator = str(item.get("indicator") or "?")
+            scope = str(item.get("scope") or "?")
+            value = item.get("value")
+            trigger = item.get("trigger_value")
+            locked = "locked" if item.get("is_locked") else "open"
+            recover = item.get("planned_recover_time") or "-"
+            parts.append(
+                f"{indicator}@{scope}"
+                f"(value={value}, trigger={trigger}, {locked}, recover={recover})"
+            )
+        return "; ".join(parts)
+
+    async def _capture_quantitative_rules_violation(self,
+                                                    symbol: str,
+                                                    *,
+                                                    context: str,
+                                                    error: Exception) -> None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        error_text = str(error)
+        payload = None
+
+        try:
+            payload = await self._order_mgr.get_api_trading_status(symbol)
+        except Exception as status_err:
+            log.warning(
+                f"Trade {symbol}: no se pudo consultar apiTradingStatus tras -4400: "
+                f"{status_err}"
+            )
+
+        indicators = []
+        is_locked = True
+        planned_recover_time = None
+        api_update_time = None
+
+        if isinstance(payload, dict):
+            api_update_time = self._ms_to_iso(payload.get("updateTime"))
+            raw_indicators = payload.get("indicators")
+            if isinstance(raw_indicators, dict):
+                for scope, items in raw_indicators.items():
+                    if not isinstance(items, list):
+                        continue
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        normalized = {
+                            "scope": scope,
+                            "indicator": item.get("indicator"),
+                            "value": item.get("value"),
+                            "trigger_value": item.get("triggerValue"),
+                            "planned_recover_time": self._ms_to_iso(
+                                item.get("plannedRecoverTime")
+                            ),
+                            "is_locked": bool(item.get("isLocked")),
+                        }
+                        indicators.append(normalized)
+
+            if indicators:
+                is_locked = any(item.get("is_locked") for item in indicators)
+                planned_candidates = [
+                    item.get("planned_recover_time")
+                    for item in indicators
+                    if item.get("planned_recover_time")
+                ]
+                planned_recover_time = min(planned_candidates) if planned_candidates else None
+
+        self._quantitative_rules_status = {
+            "active": True,
+            "symbol": symbol,
+            "context": context,
+            "error_code": getattr(error, "code", None),
+            "error_message": error_text,
+            "captured_at": now_iso,
+            "api_update_time": api_update_time,
+            "is_locked": is_locked,
+            "planned_recover_time": planned_recover_time,
+            "indicators": indicators,
+        }
+
+        recover_suffix = (
+            f" Recuperación prevista: {planned_recover_time}."
+            if planned_recover_time else ""
+        )
+        log.warning(
+            f"Binance bloqueó nuevas entradas por reglas cuantitativas (-4400) en "
+            f"{symbol} durante {context}.{recover_suffix}"
+        )
+        indicators_text = self._format_quantitative_indicators_for_log(indicators)
+        if indicators_text:
+            log.warning(
+                f"Indicadores apiTradingStatus para {symbol}: {indicators_text}"
+            )
+
+    def _set_entry_rejected_no_sl_capacity(self,
+                                           *,
+                                           pair: str,
+                                           trade_id: str | None,
+                                           retry_after: datetime | None,
+                                           reason: str) -> None:
+        self._entry_rejected_no_sl_capacity = {
+            "pair": pair,
+            "trade_id": trade_id,
+            "retry_after": retry_after.isoformat() if retry_after else None,
+            "reason": reason,
+        }
+
+    def _clear_entry_rejected_no_sl_capacity(self) -> None:
+        self._entry_rejected_no_sl_capacity = None
+
+    def _signal_requires_new_conditional_slot(self, sig: Signal) -> bool:
+        if self._cfg.sl_por_par:
+            return self.open_count_pair(sig.pair) == 0
+        return True
+
+    async def _ensure_conditional_capacity_for_new_signal(self, sig: Signal) -> bool:
+        if not self._signal_requires_new_conditional_slot(sig):
+            self._clear_entry_rejected_no_sl_capacity()
+            return True
+
+        try:
+            open_algo_orders = await self._order_mgr.get_all_open_algo_orders()
+        except Exception as e:
+            log.warning(
+                f"Señal {sig.pair}: no se pudo verificar el límite de órdenes "
+                f"condicionales en Binance: {e}"
+            )
+            return True
+
+        if len(open_algo_orders) < 200:
+            self._clear_entry_rejected_no_sl_capacity()
+            return True
+
+        candidate = await self._select_pair_to_force_close_for_sl_capacity(sig.pair)
+        if candidate is None:
+            reason = (
+                "Binance alcanzó el límite de órdenes condicionales y todas las "
+                "posiciones abiertas están perdiendo."
+            )
+            self._set_entry_rejected_no_sl_capacity(
+                pair=sig.pair,
+                trade_id=None,
+                retry_after=None,
+                reason=reason,
+            )
+            log.warning(
+                f"Señal {sig.pair} descartada: ENTRY_REJECTED_NO_SL_CAPACITY "
+                f"(Conditional={len(open_algo_orders)} y sin posición ganadora para liberar hueco)"
+            )
+            return False
+
+        log.warning(
+            f"Señal {sig.pair}: límite de órdenes condicionales alcanzado "
+            f"(Conditional={len(open_algo_orders)}). Se liberará capacidad "
+            f"cerrando {candidate['pair']}."
+        )
+        closed = await self._force_close_pair_for_sl_capacity(candidate["pair"], sig.pair)
+        if closed:
+            self._clear_entry_rejected_no_sl_capacity()
+            return True
+
+        reason = (
+            f"No se pudo liberar capacidad cerrando {candidate['pair']}."
+        )
+        self._set_entry_rejected_no_sl_capacity(
+            pair=sig.pair,
+            trade_id=None,
+            retry_after=None,
+            reason=reason,
+        )
+        log.warning(
+            f"Señal {sig.pair} descartada: ENTRY_REJECTED_NO_SL_CAPACITY "
+            f"(falló el cierre forzado de {candidate['pair']})"
+        )
+        return False
+
+    async def _select_pair_to_force_close_for_sl_capacity(self,
+                                                          blocked_pair: str) -> Optional[dict]:
+        pair_trades: Dict[str, list[Trade]] = {}
+        for trade in self._trades.values():
+            if trade.status != TradeStatus.OPEN or trade.pair == blocked_pair:
+                continue
+            pair_trades.setdefault(trade.pair, []).append(trade)
+
+        candidates: list[dict] = []
+        for pair, trades in pair_trades.items():
+            total_qty = sum(float(t.entry_quantity or 0.0) for t in trades)
+            if total_qty <= 0:
+                continue
+
+            weighted_entry = sum(
+                float(t.entry_price or 0.0) * float(t.entry_quantity or 0.0)
+                for t in trades
+            ) / total_qty
+
+            try:
+                mark_price = await self._order_mgr.get_mark_price(pair)
+            except Exception as e:
+                log.warning(
+                    f"Límite SL: no se pudo leer mark price de {pair} "
+                    f"para liberar capacidad: {e}"
+                )
+                continue
+
+            pnl_pct = ((weighted_entry - mark_price) / weighted_entry * 100.0) \
+                if weighted_entry > 0 else 0.0
+            if pnl_pct < 0:
+                continue
+
+            tp_target = weighted_entry * (1 - self._cfg.tp_pct / 100.0)
+            gap_to_tp = max(mark_price - tp_target, 0.0)
+            candidates.append({
+                "pair": pair,
+                "pnl_pct": pnl_pct,
+                "gap_to_tp": gap_to_tp,
+            })
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: (item["gap_to_tp"], -item["pnl_pct"], item["pair"]))
+        return candidates[0]
+
+    async def _force_close_pair_for_sl_capacity(self,
+                                                pair: str,
+                                                blocked_pair: str) -> bool:
+        async with self._get_pair_sl_lock(pair):
+            trades = sorted(
+                [
+                    t for t in self._trades.values()
+                    if t.pair == pair and t.status == TradeStatus.OPEN
+                ],
+                key=lambda t: (
+                    self._parse_iso_dt(t.entry_fill_ts or t.created_at)
+                    or datetime.now(timezone.utc),
+                    t.trade_id,
+                ),
+            )
+            if not trades:
+                return False
+
+            log.warning(
+                f"Límite SL: cerrando forzadamente la posición {pair} "
+                f"({len(trades)} trades) para proteger {blocked_pair}."
+            )
+
+            for trade in trades:
+                trade.status = TradeStatus.CLOSING
+                trade.touch()
+                await self._db.save_trade(trade)
+
+            for index, trade in enumerate(trades):
+                if not self._cascade_trade_sigue_activo(trade):
+                    continue
+
+                trade.exit_type = "TP_FORZADO" if index == 0 else "TP_FORZADO_CASCADA"
+                trade.touch()
+                await self._db.save_trade(trade)
+
+                await self._cancel_counterpart(trade, "tp")
+                await self._cancel_counterpart(trade, "sl")
+
+                try:
+                    if await self._cerrar_cascade_si_posicion_ya_no_existe(
+                        trade,
+                        "cierre forzado por capacidad de SL",
+                    ):
+                        continue
+
+                    result = await self._order_mgr.close_position_market(
+                        trade.pair,
+                        trade.entry_quantity,
+                    )
+                    trade.exit_price = float(
+                        result.get("avgPrice") or result.get("price") or 0.0
+                    )
+                    trade.exit_fill_ts = datetime.now(timezone.utc).isoformat()
+                    await self._close_trade(trade)
+                except BinanceError as e:
+                    if e.code == -2022:
+                        handled = await self._resolver_reduce_only_rechazado_en_cascada(
+                            trade,
+                            "cierre forzado por capacidad de SL",
+                        )
+                        if handled:
+                            continue
+                    log.error(
+                        f"Límite SL: error cerrando forzadamente {trade.trade_id[:8]} "
+                        f"de {trade.pair}: {e}",
+                        exc_info=True,
+                    )
+                    trade.status = TradeStatus.ERROR
+                    trade.error_message = f"TP_FORZADO error: {e}"
+                    trade.touch()
+                    await self._db.save_trade(trade)
+                    return False
+                except Exception as e:
+                    log.error(
+                        f"Límite SL: error cerrando forzadamente {trade.trade_id[:8]} "
+                        f"de {trade.pair}: {e}",
+                        exc_info=True,
+                    )
+                    trade.status = TradeStatus.ERROR
+                    trade.error_message = f"TP_FORZADO error: {e}"
+                    trade.touch()
+                    await self._db.save_trade(trade)
+                    return False
+
+            return True
+
+    async def _recover_sl_capacity_after_limit(self, blocked_trade: Trade) -> bool:
+        async with self._sl_capacity_lock:
+            if blocked_trade.status != TradeStatus.OPEN:
+                return False
+
+            candidate = await self._select_pair_to_force_close_for_sl_capacity(
+                blocked_trade.pair
+            )
+            if candidate is None:
+                retry_after = self._sl_retry_after.get(blocked_trade.trade_id)
+                self._set_entry_rejected_no_sl_capacity(
+                    pair=blocked_trade.pair,
+                    trade_id=blocked_trade.trade_id,
+                    retry_after=retry_after,
+                    reason=(
+                        "Binance alcanzó el límite de órdenes condicionales y "
+                        "todas las demás posiciones abiertas están perdiendo."
+                    ),
+                )
+                log.warning(
+                    f"Trade {blocked_trade.trade_id[:8]} {blocked_trade.pair}: "
+                    "sin capacidad para SL y todas las demás posiciones abiertas "
+                    "están perdiendo. Se activa ENTRY_REJECTED_NO_SL_CAPACITY."
+                )
+                return False
+
+            log.warning(
+                f"Trade {blocked_trade.trade_id[:8]} {blocked_trade.pair}: "
+                f"liberando capacidad cerrando {candidate['pair']} "
+                f"(PnL agregado {candidate['pnl_pct']:.2f}%, gap a TP {candidate['gap_to_tp']:.6f})."
+            )
+
+            closed = await self._force_close_pair_for_sl_capacity(
+                candidate["pair"],
+                blocked_trade.pair,
+            )
+            if not closed:
+                retry_after = self._sl_retry_after.get(blocked_trade.trade_id)
+                self._set_entry_rejected_no_sl_capacity(
+                    pair=blocked_trade.pair,
+                    trade_id=blocked_trade.trade_id,
+                    retry_after=retry_after,
+                    reason=f"No se pudo liberar capacidad cerrando {candidate['pair']}.",
+                )
+                return False
+
+            self._sl_retry_after.pop(blocked_trade.trade_id, None)
+            if self._cfg.sl_por_par:
+                await self._ensure_pair_sl_serialized(
+                    blocked_trade.pair,
+                    source="sl_capacity_recovery",
+                    recover_on_4045=False,
+                )
+                owner = self._select_sl_owner_trade(blocked_trade.pair)
+                recovered = bool(owner and owner.sl_order_id)
+                if recovered:
+                    self._clear_entry_rejected_no_sl_capacity()
+                return recovered
+
+            await self._place_one_sl(blocked_trade, recover_on_4045=False)
+            recovered = bool(blocked_trade.sl_order_id)
+            if recovered:
+                self._clear_entry_rejected_no_sl_capacity()
+            return recovered
+
+    async def _has_order_count_mismatch(self) -> bool:
+        """
+        Comprueba si Binance mantiene el número esperado de órdenes abiertas.
+
+        - Modo clásico: 2 por cada trade OPEN (TP + SL).
+        - Modo SL_por_par: 1 TP por trade OPEN + 1 SL por par con trades OPEN.
+        """
+        open_trades = [
+            t for t in self._trades.values()
+            if t.status == TradeStatus.OPEN
+        ]
+        if self._cfg.sl_por_par:
+            open_pairs = {t.pair for t in open_trades}
+            blocked_sl_pairs = sum(
+                1 for pair in open_pairs
+                if (owner := self._select_sl_owner_trade(pair)) is not None
+                and not owner.sl_order_id
+                and self._is_sl_retry_blocked(owner)
+            )
+            expected_orders = len(open_trades) + len(open_pairs) - blocked_sl_pairs
+            expected_formula = (
+                f"{len(open_trades)} TP + {len(open_pairs) - blocked_sl_pairs} SL por par"
+            )
+        else:
+            blocked_sl_trades = sum(
+                1 for t in open_trades
+                if not t.sl_order_id and self._is_sl_retry_blocked(t)
+            )
+            expected_orders = len(open_trades) * 2 - blocked_sl_trades
+            expected_formula = f"2 x {len(open_trades)} trades OPEN"
+
+        try:
+            all_open = await self._order_mgr.get_all_open_orders()
+            all_algo = await self._order_mgr.get_all_open_algo_orders()
+        except Exception as e:
+            log.error(
+                f"Chequeo de recuento de órdenes: no se pudo consultar Binance: {e}",
+                exc_info=True,
+            )
+            return False
+
+        actual_orders = len(all_open) + len(all_algo)
+        if actual_orders == expected_orders:
+            log.debug(
+                "Chequeo órdenes/trades OK: Binance=%s, esperado=%s (%s)",
+                actual_orders,
+                expected_orders,
+                expected_formula,
+            )
+            return False
+
+        log.warning(
+            "Chequeo órdenes/trades: Binance=%s, esperado=%s (%s) "
+            "-> forzando reconciliación",
+            actual_orders,
+            expected_orders,
+            expected_formula,
+        )
+        return True
+
+    def _get_open_trades_for_pair(self, pair: str) -> list[Trade]:
+        trades = [
+            t for t in self._trades.values()
+            if t.pair == pair and t.status == TradeStatus.OPEN
+        ]
+        return sorted(
+            trades,
+            key=lambda t: (
+                float(t.entry_price) if t.entry_price is not None else float("inf"),
+                t.created_at or "",
+                t.trade_id,
+            ),
+        )
+
+    def _select_sl_owner_trade(self, pair: str) -> Optional[Trade]:
+        open_trades = self._get_open_trades_for_pair(pair)
+        return open_trades[0] if open_trades else None
+
+    @staticmethod
+    def _select_sl_owner_trade_from_snapshot(
+        trades_snapshot: list[Trade],
+        pair: str,
+    ) -> Optional[Trade]:
+        open_trades = sorted(
+            [
+                trade for trade in trades_snapshot
+                if trade.pair == pair and trade.status == TradeStatus.OPEN
+            ],
+            key=lambda t: (
+                float(t.entry_price) if t.entry_price is not None else float("inf"),
+                t.created_at or "",
+                t.trade_id,
+            ),
+        )
+        return open_trades[0] if open_trades else None
+
+    async def _remember_trade(self, trade: Trade) -> None:
+        async with self._trades_lock:
+            self._trades[trade.trade_id] = trade
+
+    async def _forget_trade(self, trade_id: str) -> None:
+        async with self._trades_lock:
+            self._trades.pop(trade_id, None)
+
+    def _get_pair_sl_lock(self, pair: str) -> asyncio.Lock:
+        lock = self._pair_sl_locks.get(pair)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._pair_sl_locks[pair] = lock
+        return lock
+
+    def _expected_open_order_ids(
+        self,
+        valid_pairs: set[str],
+        trades_snapshot: Optional[list[Trade]] = None,
+    ) -> set[int]:
+        """
+        Devuelve los IDs de órdenes que el motor considera legítimos en Binance.
+
+        Esto permite purgar órdenes sobrantes dentro de un símbolo que sigue
+        teniendo posición abierta, no solo las de símbolos ya cerrados.
+        """
+        expected_ids: set[int] = set()
+        trades = trades_snapshot if trades_snapshot is not None else list(self._trades.values())
+
+        for trade in trades:
+            if trade.pair not in valid_pairs:
+                continue
+
+            if trade.status == TradeStatus.OPENING:
+                if trade.entry_order_id:
+                    expected_ids.add(int(trade.entry_order_id))
+                continue
+
+            if trade.status not in (TradeStatus.OPEN, TradeStatus.CLOSING):
+                continue
+
+            if trade.tp_order_id:
+                expected_ids.add(int(trade.tp_order_id))
+
+            if trade.status == TradeStatus.CLOSING and trade.sl_order_id:
+                expected_ids.add(int(trade.sl_order_id))
+                continue
+
+            if not self._cfg.sl_por_par and trade.sl_order_id:
+                expected_ids.add(int(trade.sl_order_id))
+
+        if self._cfg.sl_por_par:
+            open_pairs = {
+                trade.pair
+                for trade in trades
+                if trade.status == TradeStatus.OPEN and trade.pair in valid_pairs
+            }
+            for pair in open_pairs:
+                owner = self._select_sl_owner_trade_from_snapshot(trades, pair)
+                if owner and owner.sl_order_id:
+                    expected_ids.add(int(owner.sl_order_id))
+
+        return expected_ids
+
+    @staticmethod
+    def _group_open_order_ids_by_symbol(orders: list[dict]) -> dict[str, set[int]]:
+        grouped: dict[str, set[int]] = {}
+        for order in orders:
+            symbol = order.get("symbol")
+            order_id = order.get("orderId")
+            if not symbol or order_id is None:
+                continue
+            try:
+                oid = int(order_id)
+            except (TypeError, ValueError):
+                continue
+            grouped.setdefault(symbol, set()).add(oid)
+        return grouped
+
+    async def _snapshot_live_purge_state(
+        self,
+        current_binance_pairs: set[str],
+    ) -> tuple[set[str], set[int]]:
+        async with self._trades_lock:
+            trades_snapshot = list(self._trades.values())
+
+        live_valid_pairs = set(current_binance_pairs)
+        live_valid_pairs.update(
+            trade.pair
+            for trade in trades_snapshot
+            if trade.status in (
+                TradeStatus.OPEN,
+                TradeStatus.OPENING,
+                TradeStatus.CLOSING,
+            )
+        )
+        expected_order_ids = self._expected_open_order_ids(
+            live_valid_pairs,
+            trades_snapshot=trades_snapshot,
+        )
+        return live_valid_pairs, expected_order_ids
+
+    def _calc_sl_trigger_price(self, trade: Trade) -> float:
+        if not trade.entry_price:
+            return 0.0
+        return float(trade.entry_price) * (1 + self._cfg.sl_pct / 100.0)
+
+    async def _clear_trade_sl_tracking(
+        self,
+        trade: Trade,
+        *,
+        clear_error_message: bool = False,
+        persist: bool = True,
+    ) -> None:
+        oid: int | None = None
+        if trade.sl_order_id:
+            try:
+                oid = int(trade.sl_order_id)
+            except (TypeError, ValueError):
+                oid = None
+
+        changed = bool(trade.sl_order_id or trade.sl_trigger_price or trade.sl_price)
+
+        if oid is not None:
+            self._by_sl.pop(oid, None)
+            self._ws_mgr.unregister(oid)
+
+        trade.sl_order_id = None
+        trade.sl_trigger_price = None
+        trade.sl_price = None
+        self._sl_retry_after.pop(trade.trade_id, None)
+
+        if clear_error_message and trade.error_message and trade.error_message.startswith("SL pendiente por límite"):
+            trade.error_message = None
+            changed = True
+
+        if changed:
+            trade.touch()
+            if persist:
+                await self._db.save_trade(trade)
+
+    async def _close_trade_by_pair_sl_rotation(self, trade: Trade, mark_price: float) -> bool:
+        trade.status = TradeStatus.CLOSING
+        trade.touch()
+        await self._db.save_trade(trade)
+
+        await self._cancel_counterpart(trade, "tp")
+        await self._clear_trade_sl_tracking(trade, clear_error_message=True)
+
+        try:
+            result = await self._order_mgr.close_position_market(
+                trade.pair,
+                trade.entry_quantity,
+            )
+            exit_price = float(result.get("avgPrice") or result.get("price") or 0.0)
+            if not exit_price:
+                exit_price = float(mark_price or 0.0)
+            trade.exit_price = exit_price
+            trade.exit_fill_ts = datetime.now(timezone.utc).isoformat()
+            trade.exit_type = "SL_ROTACION_MKT"
+            await self._close_trade(trade)
+            log.warning(
+                f"SL por par: trade {trade.trade_id[:8]} {trade.pair} cerrado a MARKET "
+                f"porque su trigger teórico ya estaba cruzado."
+            )
+            return True
+        except Exception as e:
+            trade.status = TradeStatus.ERROR
+            trade.error_message = f"SL por par MARKET fallback error: {e}"
+            trade.touch()
+            await self._db.save_trade(trade)
+            await self._emit(EventType.ERROR, trade.trade_id, {
+                "msg": f"SL por par MARKET error: {e}",
+            })
+            log.error(
+                f"SL por par: error cerrando a MARKET el trade {trade.trade_id[:8]} "
+                f"de {trade.pair}: {e}",
+                exc_info=True,
+            )
+            return False
+
+    async def _ensure_pair_sl(
+        self,
+        pair: str,
+        *,
+        open_oids: set[int] | None = None,
+        source: str = "runtime",
+        recover_on_4045: bool = True,
+    ) -> bool:
+        if not self._cfg.sl_por_par:
+            return False
+
+        while True:
+            open_trades = self._get_open_trades_for_pair(pair)
+            if not open_trades:
+                return False
+
+            owner = open_trades[0]
+
+            if open_oids is None:
+                try:
+                    open_orders = await self._order_mgr.get_open_orders(pair)
+                    algo_orders = await self._order_mgr.get_open_algo_orders(pair)
+                    open_oids = {
+                        int(o["orderId"])
+                        for o in (open_orders + algo_orders)
+                        if o.get("orderId")
+                    }
+                except Exception as e:
+                    log.error(
+                        f"SL por par: no se pudieron leer las órdenes abiertas de {pair}: {e}",
+                        exc_info=True,
+                    )
+                    return False
+
+            for extra in open_trades[1:]:
+                extra_oid = int(extra.sl_order_id) if extra.sl_order_id else None
+                if extra_oid and extra_oid in open_oids:
+                    log.warning(
+                        f"SL por par: trade {extra.trade_id[:8]} de {pair} conserva un "
+                        "SL extra; se cancela para dejar un único SL condicional."
+                    )
+                    await self._cancel_counterpart(extra, "sl")
+                if extra.sl_order_id or extra.sl_trigger_price or extra.sl_price:
+                    await self._clear_trade_sl_tracking(
+                        extra,
+                        clear_error_message=True,
+                    )
+
+            owner_oid = int(owner.sl_order_id) if owner.sl_order_id else None
+            if owner_oid and owner_oid in open_oids:
+                self._by_sl[owner_oid] = owner.trade_id
+                self._ws_mgr.register_sl(owner_oid)
+                self._sl_retry_after.pop(owner.trade_id, None)
+                self._clear_entry_rejected_no_sl_capacity()
+                if owner.error_message and owner.error_message.startswith("SL pendiente por límite"):
+                    owner.error_message = None
+                    owner.touch()
+                    await self._db.save_trade(owner)
+                if source == "reconcile":
+                    log.info(
+                        f"SL por par: {pair} protegido por el trade {owner.trade_id[:8]} "
+                        f"(SL {owner_oid} re-registrado)"
+                    )
+                return True
+
+            if owner.sl_order_id or owner.sl_trigger_price or owner.sl_price:
+                if owner.sl_order_id:
+                    log.warning(
+                        f"SL por par: el trade protector {owner.trade_id[:8]} de {pair} "
+                        "tenía un SL local no visible en Binance; se repondrá."
+                    )
+                await self._clear_trade_sl_tracking(owner, clear_error_message=True)
+
+            if self._is_sl_retry_blocked(owner):
+                retry_after = self._sl_retry_after.get(owner.trade_id)
+                log.warning(
+                    f"SL por par: {pair} sin SL porque el trade protector "
+                    f"{owner.trade_id[:8]} sigue en cooldown hasta {retry_after.isoformat()}"
+                )
+                return False
+
+            try:
+                mark_price = await self._order_mgr.get_mark_price(pair)
+            except Exception as e:
+                log.error(
+                    f"SL por par: no se pudo obtener el mark price de {pair}: {e}",
+                    exc_info=True,
+                )
+                return False
+
+            trigger_price = self._calc_sl_trigger_price(owner)
+            if trigger_price <= mark_price:
+                log.warning(
+                    f"SL por par: el nuevo protector {owner.trade_id[:8]} de {pair} "
+                    f"ya tiene el trigger teórico cruzado (trigger={trigger_price}, mark={mark_price}) "
+                    "→ cierre MARKET y nueva rotación."
+                )
+                closed = await self._close_trade_by_pair_sl_rotation(owner, mark_price)
+                if not closed:
+                    return False
+                open_oids = None
+                continue
+
+            await self._place_one_sl(owner, recover_on_4045=recover_on_4045)
+            if owner.trade_id not in self._trades:
+                open_oids = None
+                continue
+            return bool(owner.sl_order_id)
+
+    async def _ensure_pair_sl_serialized(
+        self,
+        pair: str,
+        *,
+        open_oids: set[int] | None = None,
+        source: str = "runtime",
+        recover_on_4045: bool = True,
+    ) -> bool:
+        async with self._get_pair_sl_lock(pair):
+            return await self._ensure_pair_sl(
+                pair,
+                open_oids=open_oids,
+                source=source,
+                recover_on_4045=recover_on_4045,
+            )
 
     async def reconcile(self, db_trades: list[Trade]):
         """
@@ -393,15 +1361,51 @@ class TradeEngine:
             log.error(f"Reconciliación: no se pudieron obtener posiciones: {e}")
             binance_pairs = set()
 
+        open_oids_by_symbol: dict[str, set[int]] = {}
+        try:
+            initial_open = await self._order_mgr.get_all_open_orders()
+            initial_algo = await self._order_mgr.get_all_open_algo_orders()
+            open_oids_by_symbol = self._group_open_order_ids_by_symbol(
+                initial_open + initial_algo
+            )
+        except Exception as e:
+            log.error(
+                f"ReconciliaciÃ³n: no se pudo construir el snapshot inicial de Ã³rdenes: {e}",
+                exc_info=True,
+            )
+
         db_open_pairs:    set[str] = set()
         db_opening_pairs: set[str] = set()
+        pairs_with_active_closing = {
+            trade.pair
+            for trade in db_trades
+            if trade.status == TradeStatus.CLOSING
+        }
+        skipped_pairs_in_reconcile: set[str] = set()
 
         # 2. Reconciliar estado de los trades activos en memoria
         for t in db_trades:
-            self._trades[t.trade_id] = t
+            await self._remember_trade(t)
             try:
+                if t.pair in pairs_with_active_closing:
+                    if t.pair not in skipped_pairs_in_reconcile:
+                        log.info(
+                            f"ReconciliaciÃ³n: se omite temporalmente {t.pair} "
+                            "porque hay cierres/cascada activos en el par"
+                        )
+                        skipped_pairs_in_reconcile.add(t.pair)
+                    if t.status == TradeStatus.OPEN:
+                        db_open_pairs.add(t.pair)
+                    elif t.status in (TradeStatus.OPENING, TradeStatus.SIGNAL_RECEIVED):
+                        db_opening_pairs.add(t.pair)
+                    continue
+
                 if t.status == TradeStatus.OPEN:
-                    await self._reconcile_open(t, binance_pairs)
+                    await self._reconcile_open_with_snapshot(
+                        t,
+                        binance_pairs,
+                        open_oids_by_symbol.get(t.pair, set()),
+                    )
                     if t.status == TradeStatus.OPEN:
                         db_open_pairs.add(t.pair)
                 elif t.status in (TradeStatus.OPENING, TradeStatus.SIGNAL_RECEIVED):
@@ -423,6 +1427,20 @@ class TradeEngine:
                     exc_info=True
                 )
 
+        if self._cfg.sl_por_par:
+            for pair in sorted(db_open_pairs - pairs_with_active_closing):
+                try:
+                    await self._ensure_pair_sl_serialized(
+                        pair,
+                        open_oids=open_oids_by_symbol.get(pair, set()),
+                        source="reconcile",
+                    )
+                except Exception as e:
+                    log.error(
+                        f"Reconciliación: error asegurando SL por par en {pair}: {e}",
+                        exc_info=True,
+                    )
+
         for pair in binance_pairs - db_open_pairs:
             log.warning(
                 f"Reconciliación: posición abierta en Binance para {pair} "
@@ -435,14 +1453,29 @@ class TradeEngine:
             all_algo = await self._order_mgr.get_all_open_algo_orders()
             all_orders = all_open + all_algo
 
-            # Un par es válido si tiene posición abierta O si el bot está
-            # intentando entrar ahora mismo (chase loop activo)
-            valid_pairs = binance_pairs.union(db_opening_pairs)
+            try:
+                current_positions = await self._order_mgr.get_all_positions()
+                current_binance_pairs = {p["symbol"] for p in current_positions}
+            except Exception as e:
+                log.debug(
+                    f"Reconciliación: no se pudieron refrescar posiciones para la purga final: {e}"
+                )
+                current_binance_pairs = set(binance_pairs)
+
+            # Foto viva justo antes de purgar, para no cancelar órdenes de pares
+            # que hayan entrado mientras esta reconciliación seguía en curso.
+            valid_pairs, expected_order_ids = await self._snapshot_live_purge_state(
+                current_binance_pairs.union(db_opening_pairs)
+            )
 
             cleaned_count = 0
             for o in all_orders:
                 sym = o.get("symbol")
-                oid = int(o.get("orderId"))
+                try:
+                    oid = int(o.get("orderId"))
+                except (TypeError, ValueError):
+                    log.warning(f"Reconciliación: orden sin orderId interpretable: {o}")
+                    continue
 
                 # Si la orden pertenece a un par sin posición abierta → huérfana
                 if sym not in valid_pairs:
@@ -457,10 +1490,24 @@ class TradeEngine:
                         log.error(
                             f"Fallo al cancelar orden huérfana {oid} en {sym}: {e}"
                         )
+                    continue
+
+                if oid not in expected_order_ids:
+                    log.warning(
+                        f"Reconciliación: eliminando orden sobrante {oid} en {sym} "
+                        "(no asociada a trades activos del motor)"
+                    )
+                    try:
+                        await self._order_mgr.cancel_order(sym, oid)
+                        cleaned_count += 1
+                    except Exception as e:
+                        log.error(
+                            f"Fallo al cancelar orden sobrante {oid} en {sym}: {e}"
+                        )
 
             if cleaned_count > 0:
                 log.info(
-                    f"Reconciliación: {cleaned_count} órdenes huérfanas "
+                    f"Reconciliación: {cleaned_count} órdenes huérfanas/sobrantes "
                     "purgadas de Binance."
                 )
         except Exception as e:
@@ -469,7 +1516,7 @@ class TradeEngine:
                 exc_info=True
             )
 
-    async def _reconcile_open(self, t: Trade, binance_pairs: set):
+    async def _reconcile_open_legacy_old(self, t: Trade, binance_pairs: set):
         """Trade OPEN: verifica posición y comprueba/re-coloca TP y SL."""
         if t.pair not in binance_pairs:
             log.warning(
@@ -543,7 +1590,15 @@ class TradeEngine:
                 log.warning(
                     f"Reconciliación: trade {t.trade_id[:8]} sin SL → colocando"
                 )
-            await self._place_one_sl(t)
+            if self._is_sl_retry_blocked(t):
+                retry_after = self._sl_retry_after.get(t.trade_id)
+                log.warning(
+                    f"Reconciliación: trade {t.trade_id[:8]} sin SL pero en "
+                    f"cooldown por límite de stops hasta {retry_after.isoformat()} "
+                    "→ posponiendo reintento"
+                )
+            else:
+                await self._place_one_sl(t)
 
     async def _reconcile_opening(self, t: Trade, binance_pairs: set):
         """Trade OPENING: consulta si la orden de entrada se llenó mientras
@@ -556,7 +1611,7 @@ class TradeEngine:
             t.status = TradeStatus.NOT_EXECUTED
             t.touch()
             await self._db.save_trade(t)
-            self._trades.pop(t.trade_id, None)
+            await self._forget_trade(t.trade_id)
             return
 
         try:
@@ -570,7 +1625,7 @@ class TradeEngine:
             t.status = TradeStatus.NOT_EXECUTED
             t.touch()
             await self._db.save_trade(t)
-            self._trades.pop(t.trade_id, None)
+            await self._forget_trade(t.trade_id)
             return
 
         if status == "FILLED":
@@ -609,7 +1664,194 @@ class TradeEngine:
             t.status = TradeStatus.NOT_EXECUTED
             t.touch()
             await self._db.save_trade(t)
-            self._trades.pop(t.trade_id, None)
+            await self._forget_trade(t.trade_id)
+
+    async def _reconcile_open_with_snapshot(
+        self,
+        t: Trade,
+        binance_pairs: set,
+        open_oids: set[int],
+    ):
+        """Variante de reconciliación OPEN que reutiliza un snapshot global de órdenes."""
+        if t.pair not in binance_pairs:
+            log.warning(
+                f"Reconciliación: trade {t.trade_id[:8]} ({t.pair}) "
+                "OPEN en DB pero sin posición en Binance "
+                "→ Cancelando TP/SL huérfanos y resolviendo el motivo de cierre"
+            )
+
+            await self._cancel_counterpart(t, "tp")
+            await self._cancel_counterpart(t, "sl")
+            await self._apply_reconciled_close(
+                t,
+                "Reconciliación: posición cerrada externamente",
+            )
+            return
+
+        if t.tp_order_id and int(t.tp_order_id) in open_oids:
+            tp_oid = int(t.tp_order_id)
+            self._by_tp[tp_oid] = t.trade_id
+            self._ws_mgr.register_tp(tp_oid)
+            log.info(
+                f"Reconciliación: trade {t.trade_id[:8]} "
+                f"TP {tp_oid} re-registrado"
+            )
+        else:
+            if t.tp_order_id:
+                log.warning(
+                    f"Reconciliación: trade {t.trade_id[:8]} "
+                    f"TP {t.tp_order_id} no encontrado → re-colocando"
+                )
+            else:
+                log.warning(
+                    f"Reconciliación: trade {t.trade_id[:8]} sin TP → colocando"
+                )
+            await self._place_one_tp(t)
+
+        if self._cfg.sl_por_par:
+            if t.sl_order_id and int(t.sl_order_id) in open_oids:
+                sl_oid = int(t.sl_order_id)
+                self._by_sl[sl_oid] = t.trade_id
+                self._ws_mgr.register_sl(sl_oid)
+                log.info(
+                    f"Reconciliación: trade {t.trade_id[:8]} "
+                    f"SL {sl_oid} detectado; se validará por par"
+                )
+            elif t.sl_order_id:
+                log.info(
+                    f"Reconciliación: trade {t.trade_id[:8]} "
+                    f"tenía referencia local al SL {t.sl_order_id}; se validará por par"
+                )
+            return
+
+        if t.sl_order_id and int(t.sl_order_id) in open_oids:
+            sl_oid = int(t.sl_order_id)
+            self._by_sl[sl_oid] = t.trade_id
+            self._ws_mgr.register_sl(sl_oid)
+            log.info(
+                f"Reconciliación: trade {t.trade_id[:8]} "
+                f"SL {sl_oid} re-registrado"
+            )
+        else:
+            if t.sl_order_id:
+                log.warning(
+                    f"Reconciliación: trade {t.trade_id[:8]} "
+                    f"SL {t.sl_order_id} no encontrado → re-colocando"
+                )
+            else:
+                log.warning(
+                    f"Reconciliación: trade {t.trade_id[:8]} sin SL → colocando"
+                )
+            if self._is_sl_retry_blocked(t):
+                retry_after = self._sl_retry_after.get(t.trade_id)
+                log.warning(
+                    f"Reconciliación: trade {t.trade_id[:8]} sin SL pero en "
+                    f"cooldown por límite de stops hasta {retry_after.isoformat()} "
+                    "→ posponiendo reintento"
+                )
+            else:
+                await self._place_one_sl(t)
+
+    async def _reconcile_open(
+        self,
+        t: Trade,
+        binance_pairs: set,
+        *,
+        open_oids: set[int] | None = None,
+    ):
+        """Trade OPEN: verifica posición y comprueba/re-coloca TP y SL."""
+        if t.pair not in binance_pairs:
+            log.warning(
+                f"Reconciliación: trade {t.trade_id[:8]} ({t.pair}) "
+                "OPEN en DB pero sin posición en Binance "
+                "→ Cancelando TP/SL huérfanos y resolviendo el motivo de cierre"
+            )
+
+            await self._cancel_counterpart(t, "tp")
+            await self._cancel_counterpart(t, "sl")
+            await self._apply_reconciled_close(
+                t,
+                "Reconciliación: posición cerrada externamente",
+            )
+            return
+
+        try:
+            open_orders = await self._order_mgr.get_open_orders(t.pair)
+            open_oids = {int(o["orderId"]) for o in open_orders}
+        except Exception as e:
+            log.error(
+                f"Reconciliación: error obteniendo órdenes de {t.pair}: {e}"
+            )
+            open_oids = set()
+        try:
+            algo_orders = await self._order_mgr.get_open_algo_orders(t.pair)
+            open_oids |= {int(o["orderId"]) for o in algo_orders}
+        except Exception as e:
+            log.debug(f"Reconciliación: get_open_algo_orders({t.pair}): {e}")
+
+        if t.tp_order_id and int(t.tp_order_id) in open_oids:
+            tp_oid = int(t.tp_order_id)
+            self._by_tp[tp_oid] = t.trade_id
+            self._ws_mgr.register_tp(tp_oid)
+            log.info(
+                f"Reconciliación: trade {t.trade_id[:8]} "
+                f"TP {tp_oid} re-registrado"
+            )
+        else:
+            if t.tp_order_id:
+                log.warning(
+                    f"Reconciliación: trade {t.trade_id[:8]} "
+                    f"TP {t.tp_order_id} no encontrado → re-colocando"
+                )
+            else:
+                log.warning(
+                    f"Reconciliación: trade {t.trade_id[:8]} sin TP → colocando"
+                )
+            await self._place_one_tp(t)
+
+        if self._cfg.sl_por_par:
+            if t.sl_order_id and int(t.sl_order_id) in open_oids:
+                sl_oid = int(t.sl_order_id)
+                self._by_sl[sl_oid] = t.trade_id
+                self._ws_mgr.register_sl(sl_oid)
+                log.info(
+                    f"Reconciliación: trade {t.trade_id[:8]} "
+                    f"SL {sl_oid} detectado; se validará por par"
+                )
+            elif t.sl_order_id:
+                log.info(
+                    f"Reconciliación: trade {t.trade_id[:8]} "
+                    f"tenía referencia local al SL {t.sl_order_id}; se validará por par"
+                )
+            return
+
+        if t.sl_order_id and int(t.sl_order_id) in open_oids:
+            sl_oid = int(t.sl_order_id)
+            self._by_sl[sl_oid] = t.trade_id
+            self._ws_mgr.register_sl(sl_oid)
+            log.info(
+                f"Reconciliación: trade {t.trade_id[:8]} "
+                f"SL {sl_oid} re-registrado"
+            )
+        else:
+            if t.sl_order_id:
+                log.warning(
+                    f"Reconciliación: trade {t.trade_id[:8]} "
+                    f"SL {t.sl_order_id} no encontrado → re-colocando"
+                )
+            else:
+                log.warning(
+                    f"Reconciliación: trade {t.trade_id[:8]} sin SL → colocando"
+                )
+            if self._is_sl_retry_blocked(t):
+                retry_after = self._sl_retry_after.get(t.trade_id)
+                log.warning(
+                    f"Reconciliación: trade {t.trade_id[:8]} sin SL pero en "
+                    f"cooldown por límite de stops hasta {retry_after.isoformat()} "
+                    "→ posponiendo reintento"
+                )
+            else:
+                await self._place_one_sl(t)
 
     async def _reconcile_closing(self, t: Trade, binance_pairs: set):
         """Trade CLOSING: si la posición ya no existe → CLOSED;
@@ -663,6 +1905,21 @@ class TradeEngine:
             )
             return
 
+        capacity_guard = self._get_sl_capacity_block_status()
+        if (
+            capacity_guard["active"]
+            and capacity_guard["trade_id"]
+            and self._signal_requires_new_conditional_slot(sig)
+        ):
+            retry_suffix = ""
+            if capacity_guard["retry_after"]:
+                retry_suffix = f" hasta {capacity_guard['retry_after']}"
+            log.warning(
+                f"Señal {sig.pair} descartada: ENTRY_REJECTED_NO_SL_CAPACITY "
+                f"(bloqueo activo en {capacity_guard['pair']}{retry_suffix})"
+            )
+            return
+
         ignore_reason = self._register_ignore_cycle(sig)
         if ignore_reason:
             log.info(f"Señal {sig.pair} descartada: {ignore_reason}")
@@ -697,9 +1954,12 @@ class TradeEngine:
             )
             return
 
+        if not await self._ensure_conditional_capacity_for_new_signal(sig):
+            return
+
         trade = Trade(pair=sig.pair, signal_ts=sig.fecha_hora,
                       signal_data=_signal_to_dict(sig))
-        self._trades[trade.trade_id] = trade
+        await self._remember_trade(trade)
 
         await self._db.save_trade(trade)
         await self._emit(EventType.SIGNAL, trade.trade_id, {
@@ -797,6 +2057,7 @@ class TradeEngine:
                         sig.pair, qty, price_match=price_match,
                         newClientOrderId=client_oid
                     )
+                    self._clear_quantitative_rules_status()
                     order_id = int(result["orderId"])
 
                     # 2. Respaldo numérico tradicional
@@ -852,6 +2113,12 @@ class TradeEngine:
                         await asyncio.sleep(cfg.chase_interval_seconds)
 
                 except BinanceError as e:
+                    if e.code == -4400:
+                        await self._capture_quantitative_rules_violation(
+                            sig.pair,
+                            context=f"apertura attempt {attempt}",
+                            error=e,
+                        )
                     log.error(
                         f"Trade {trade.trade_id[:8]} apertura error attempt {attempt}: {e}",
                         exc_info=True
@@ -880,6 +2147,7 @@ class TradeEngine:
                     result    = await self._order_mgr.open_short_market(
                         sig.pair, qty, newClientOrderId=client_oid
                     )
+                    self._clear_quantitative_rules_status()
                     order_id  = int(result["orderId"])
                     trade.entry_order_id = order_id
                     trade.entry_quantity = qty
@@ -904,6 +2172,17 @@ class TradeEngine:
                     self._ws_mgr.unregister_client_id(client_oid)
                     self._by_entry.pop(order_id, None)
                     self._by_client_id.pop(client_oid, None)
+                except BinanceError as e:
+                    if e.code == -4400:
+                        await self._capture_quantitative_rules_violation(
+                            sig.pair,
+                            context="market fallback",
+                            error=e,
+                        )
+                    log.error(
+                        f"Trade {trade.trade_id[:8]} MARKET fallback error: {e}",
+                        exc_info=True
+                    )
                 except Exception as e:
                     log.error(
                         f"Trade {trade.trade_id[:8]} MARKET fallback error: {e}",
@@ -920,7 +2199,7 @@ class TradeEngine:
             await self._emit(EventType.ERROR, trade.trade_id, {
                 "msg": "NOT_EXECUTED: sin fill tras todos los intentos"
             })
-            self._trades.pop(trade.trade_id, None)
+            await self._forget_trade(trade.trade_id)
 
         except asyncio.CancelledError:
             # Shutdown mientras la apertura estaba en curso
@@ -944,7 +2223,7 @@ class TradeEngine:
                 await asyncio.shield(self._db.save_trade(trade))
             except Exception:
                 pass
-            self._trades.pop(trade.trade_id, None)
+            await self._forget_trade(trade.trade_id)
             raise
 
     async def _wait_fill(self, trade: Trade, order_id: int,
@@ -1060,7 +2339,10 @@ class TradeEngine:
 
     async def _place_tp_sl(self, trade: Trade):
         await self._place_one_tp(trade)
-        await self._place_one_sl(trade)
+        if self._cfg.sl_por_par:
+            await self._ensure_pair_sl_serialized(trade.pair, source="runtime")
+        else:
+            await self._place_one_sl(trade)
 
     async def _place_one_tp(self, trade: Trade):
         try:
@@ -1123,7 +2405,7 @@ class TradeEngine:
             log.error(f"Error colocando TP {trade.pair}: {e}", exc_info=True)
             await self._emit(EventType.ERROR, trade.trade_id, {"msg": f"TP error: {e}"})
 
-    async def _place_one_sl(self, trade: Trade):
+    async def _place_one_sl(self, trade: Trade, recover_on_4045: bool = True):
         """
         Coloca STOP_MARKET Algo (algoType=CONDITIONAL, workingType=MARK_PRICE)
         en Binance. La orden vive en Binance aunque el proceso se reinicie.
@@ -1139,8 +2421,13 @@ class TradeEngine:
             sl_oid                 = int(sl_result["orderId"])
             trade.sl_order_id      = str(sl_oid)
             trade.sl_trigger_price = float(sl_result.get("triggerPrice", 0))
+            trade.sl_price         = trade.sl_trigger_price
             self._by_sl[sl_oid]    = trade.trade_id
             self._ws_mgr.register_sl(sl_oid)
+            self._sl_retry_after.pop(trade.trade_id, None)
+            self._clear_entry_rejected_no_sl_capacity()
+            if trade.error_message and trade.error_message.startswith("SL pendiente por límite"):
+                trade.error_message = None
             trade.touch()
             await self._db.save_trade(trade)
             await self._emit(EventType.SL_PLACED, trade.trade_id, {
@@ -1190,6 +2477,26 @@ class TradeEngine:
                     )
                     await self._emit(EventType.ERROR, trade.trade_id,
                                      {"msg": f"SL -2021 close error: {close_err}"})
+            elif e.code == -4045:
+                retry_after = self._set_sl_retry_block(trade)
+                trade.error_message = (
+                    "SL pendiente por límite de stops de Binance (-4045). "
+                    f"Reintento tras {retry_after.isoformat()}"
+                )
+                trade.touch()
+                await self._db.save_trade(trade)
+                log.warning(
+                    f"Trade {trade.trade_id[:8]} {trade.pair}: Binance alcanzó "
+                    f"el límite global de stop orders (-4045). Reintento a partir "
+                    f"de {retry_after.isoformat()}"
+                )
+                if recover_on_4045:
+                    recovered = await self._recover_sl_capacity_after_limit(trade)
+                    if recovered:
+                        log.warning(
+                            f"Trade {trade.trade_id[:8]} {trade.pair}: capacidad de "
+                            "SL recuperada tras cierre forzado de otra posición."
+                        )
             else:
                 log.error(f"Error colocando SL {trade.pair}: {e}", exc_info=True)
                 await self._emit(EventType.ERROR, trade.trade_id,
@@ -1222,6 +2529,12 @@ class TradeEngine:
 
         # Cancelar SL que quedó pendiente
         await self._cancel_counterpart(trade, "sl")
+        if self._cfg.sl_por_par:
+            await self._clear_trade_sl_tracking(
+                trade,
+                clear_error_message=True,
+                persist=False,
+            )
         await self._close_trade(trade)
 
         # --- Cierre en cascada ---
@@ -1230,6 +2543,8 @@ class TradeEngine:
                 self._close_sibling_trades(trade.pair, "TP", trade.trade_id),
                 name=f"cascade_tp_{trade.trade_id[:8]}"
             )
+        elif self._cfg.sl_por_par:
+            await self._ensure_pair_sl_serialized(trade.pair, source="runtime")
 
     async def on_sl_fill(self, order_data: dict):
         """Callback WS: fill del SL Algo (STOP_MARKET) colocado en Binance."""
@@ -1255,6 +2570,12 @@ class TradeEngine:
 
         # Cancelar TP que quedó pendiente
         await self._cancel_counterpart(trade, "tp")
+        if self._cfg.sl_por_par:
+            await self._clear_trade_sl_tracking(
+                trade,
+                clear_error_message=True,
+                persist=False,
+            )
         await self._close_trade(trade)
 
         # --- Cierre en cascada ---
@@ -1262,6 +2583,11 @@ class TradeEngine:
             asyncio.create_task(
                 self._close_sibling_trades(trade.pair, "SL", trade.trade_id),
                 name=f"cascade_sl_{trade.trade_id[:8]}"
+            )
+        elif self._cfg.sl_por_par:
+            log.info(
+                f"SL por par: {trade.pair} queda pendiente de rearme en el "
+                "siguiente reconcile/check de órdenes."
             )
 
     async def _cancel_counterpart(self, trade: Trade, side: str):
@@ -1300,8 +2626,9 @@ class TradeEngine:
 
         trade.status = TradeStatus.CLOSED
         trade.touch()
+        self._sl_retry_after.pop(trade.trade_id, None)
         await self._db.save_trade(trade)
-        self._trades.pop(trade.trade_id, None)
+        await self._forget_trade(trade.trade_id)
 
         pnl_u = trade.pnl_usdt or 0.0
         pnl_p = trade.pnl_pct  or 0.0
@@ -1319,6 +2646,18 @@ class TradeEngine:
     def _cascade_trade_sigue_activo(self, trade: Trade) -> bool:
         actual = self._trades.get(trade.trade_id)
         return actual is trade and actual.status == TradeStatus.CLOSING
+
+    def _cascade_trade_ya_resuelto(self, trade: Trade) -> bool:
+        """
+        Devuelve True si el trade ya esta resolviendo su propio cierre y la
+        cascada no debe volver a tocar sus ordenes.
+        """
+        actual = self._trades.get(trade.trade_id)
+        if actual is not trade:
+            return True
+        if actual.status != TradeStatus.CLOSING:
+            return True
+        return bool(actual.exit_type or actual.exit_fill_ts)
 
     async def _cerrar_cascade_si_posicion_ya_no_existe(self,
                                                         trade: Trade,
@@ -1451,7 +2790,22 @@ class TradeEngine:
             await self._db.save_trade(t)
 
         async def process_one_sibling(t: Trade):
+            if self._cascade_trade_ya_resuelto(t):
+                log.info(
+                    f"Trade {t.trade_id[:8]} cascada omitida al iniciar: "
+                    "el trade ya estaba resolviendo su propio cierre"
+                )
+                return
+
             await self._cancel_counterpart(t, "tp")
+
+            if self._cascade_trade_ya_resuelto(t):
+                log.info(
+                    f"Trade {t.trade_id[:8]} cascada omitida tras cancelar TP: "
+                    "el trade paso a resolverse por su propio cierre"
+                )
+                return
+
             await self._cancel_counterpart(t, "sl")
 
             try:

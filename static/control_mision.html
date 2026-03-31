@@ -124,7 +124,7 @@
     <div style="display:flex; align-items: center; gap: 15px;">
       <div class="brand-block">
         <h1>📈 Gestiona Trades</h1>
-        <div class="brand-version">control_mision v0.34</div>
+        <div class="brand-version">control_mision v1.01</div>
       </div>
       <a href="/history" target="_blank" style="font-size:11px; background:#252850; padding:3px 8px; border-radius:4px; border:1px solid #3a3d52; color:#c9cde0;">📊 Ver Analítica Histórica</a>
     </div>
@@ -152,6 +152,14 @@
       <button class="btn btn-danger" id="btn-finish-paper" onclick="finishPaperTrading()">Fin Paper Trading</button>
       <span id="paper-finish-status" class="muted"></span>
     </div>
+  </div>
+
+  <div id="no-sl-capacity-banner" class="warning-banner">
+    <strong>ENTRY_REJECTED_NO_SL_CAPACITY</strong> · Binance ha alcanzado el límite de órdenes condicionales. Se rechazarán nuevas entradas que requieran un SL adicional hasta liberar capacidad. <span id="no-sl-capacity-extra" class="muted"></span>
+  </div>
+
+  <div id="quant-rules-banner" class="warning-banner">
+    <strong>BINANCE -4400 / SOLO REDUCEONLY</strong> · Binance ha activado un bloqueo temporal de nuevas entradas por reglas cuantitativas de Futures. <span id="quant-rules-extra" class="muted"></span>
   </div>
 
   <!-- Status chips -->
@@ -294,7 +302,7 @@
   </div>
 
 </div>
-<div class="footer">control_mision v0.34 · actualización en tiempo real vía WebSocket</div>
+<div class="footer">control_mision v1.01 · actualización en tiempo real vía WebSocket</div>
 
 <script>
 // ─────────────────────────────────────────────────────────
@@ -1125,6 +1133,60 @@ function updateStatus(data) {
     const el = document.getElementById('s-uptime');
     el.textContent = new Date(data.uptime_start).toLocaleString('es-ES',
       { dateStyle: 'short', timeStyle: 'short' });
+  }
+  const noSlBanner = document.getElementById('no-sl-capacity-banner');
+  const noSlExtra = document.getElementById('no-sl-capacity-extra');
+  if (noSlBanner) {
+    const active = !!data.entry_rejected_no_sl_capacity;
+    noSlBanner.classList.toggle('active', active);
+    if (noSlExtra) {
+      const parts = [];
+      if (data.entry_rejected_no_sl_capacity_reason) {
+        parts.push(data.entry_rejected_no_sl_capacity_reason);
+      }
+      if (data.entry_rejected_no_sl_capacity_pair) {
+        parts.push(`Par bloqueado: ${data.entry_rejected_no_sl_capacity_pair}`);
+      }
+      if (data.entry_rejected_no_sl_capacity_retry_after) {
+        const retryAt = new Date(data.entry_rejected_no_sl_capacity_retry_after);
+        if (!Number.isNaN(retryAt.getTime())) {
+          parts.push(`Reintento a partir de ${retryAt.toLocaleString('es-ES')}`);
+        }
+      }
+      noSlExtra.textContent = parts.length ? ` ${parts.join(' · ')}` : '';
+    }
+  }
+  const quantBanner = document.getElementById('quant-rules-banner');
+  const quantExtra = document.getElementById('quant-rules-extra');
+  if (quantBanner) {
+    const active = !!data.quantitative_rules_violation_active;
+    quantBanner.classList.toggle('active', active);
+    if (quantExtra) {
+      const parts = [];
+      if (data.quantitative_rules_violation_symbol) {
+        parts.push(`Símbolo: ${data.quantitative_rules_violation_symbol}`);
+      }
+      if (data.quantitative_rules_violation_context) {
+        parts.push(`Contexto: ${data.quantitative_rules_violation_context}`);
+      }
+      if (data.quantitative_rules_violation_planned_recover_time) {
+        const recoverAt = new Date(data.quantitative_rules_violation_planned_recover_time);
+        if (!Number.isNaN(recoverAt.getTime())) {
+          parts.push(`Recuperación prevista: ${recoverAt.toLocaleString('es-ES')}`);
+        }
+      }
+      if (!data.quantitative_rules_violation_planned_recover_time
+          && data.quantitative_rules_violation_captured_at) {
+        const capturedAt = new Date(data.quantitative_rules_violation_captured_at);
+        if (!Number.isNaN(capturedAt.getTime())) {
+          parts.push(`Detectado: ${capturedAt.toLocaleString('es-ES')}`);
+        }
+      }
+      if (data.quantitative_rules_violation_error_message) {
+        parts.push(data.quantitative_rules_violation_error_message);
+      }
+      quantExtra.textContent = parts.length ? ` ${parts.join(' · ')}` : '';
+    }
   }
   renderSummaryStats();
   const paperBar = document.getElementById('paper-status-bar');

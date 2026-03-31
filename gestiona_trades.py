@@ -56,7 +56,7 @@ from src.state         import StateDB
 from src.trade_engine  import TradeEngine
 from src.ws_manager    import WSManager
 
-APP_VERSION = "0.24"
+APP_VERSION = "1.01"
 
 log = get_logger("main")
 
@@ -432,15 +432,23 @@ class App:
         if not (self._notifier.enabled and self._cfg.notify_errors):
             return
         details = event.details or {}
-        lines = []
+        lines = [f"instancia: {self._cfg.instance_name}"]
         if event.trade_id:
             lines.append(f"trade_id: {event.trade_id}")
+        error_text = None
         if details:
+            for key in ("msg", "message", "error", "reason", "status"):
+                value = details.get(key)
+                if value not in (None, ""):
+                    error_text = str(value)
+                    break
+            if error_text:
+                lines.append(f"error: {error_text}")
             for key in ("pair", "symbol", "reason", "message", "error", "status"):
                 value = details.get(key)
                 if value not in (None, ""):
                     lines.append(f"{key}: {value}")
-            if not lines:
+            if len(lines) == 1:
                 lines.append(f"details: {details}")
         await self._safe_notify("ERROR en gestiona_trades", lines)
 
@@ -573,6 +581,8 @@ class App:
 
         metrics = await self._db.get_dashboard_summary(paper=False) or {}
         paper_metrics = await self._db.get_dashboard_summary(paper=True) or {}
+        sl_capacity_guard = self._engine.get_sl_capacity_guard_status()
+        quantitative_rules_guard = self._engine.get_quantitative_rules_status()
         orphan_positions = await self._get_orphan_positions()
         balance_usdt = None
 
@@ -642,6 +652,22 @@ class App:
             "real_solo_cerrando_trades": self._cfg.real_trading_solo_cerrando,
             "ws_connected":     self._ws_mgr._connected if self._ws_mgr else False,
             "ws_binance_connected": self._ws_mgr._connected if self._ws_mgr else False,
+            "entry_rejected_no_sl_capacity": sl_capacity_guard.get("active", False),
+            "entry_rejected_no_sl_capacity_mode": sl_capacity_guard.get("mode"),
+            "entry_rejected_no_sl_capacity_pair": sl_capacity_guard.get("pair"),
+            "entry_rejected_no_sl_capacity_trade_id": sl_capacity_guard.get("trade_id"),
+            "entry_rejected_no_sl_capacity_retry_after": sl_capacity_guard.get("retry_after"),
+            "entry_rejected_no_sl_capacity_reason": sl_capacity_guard.get("reason"),
+            "quantitative_rules_violation_active": quantitative_rules_guard.get("active", False),
+            "quantitative_rules_violation_symbol": quantitative_rules_guard.get("symbol"),
+            "quantitative_rules_violation_context": quantitative_rules_guard.get("context"),
+            "quantitative_rules_violation_error_code": quantitative_rules_guard.get("error_code"),
+            "quantitative_rules_violation_error_message": quantitative_rules_guard.get("error_message"),
+            "quantitative_rules_violation_captured_at": quantitative_rules_guard.get("captured_at"),
+            "quantitative_rules_violation_api_update_time": quantitative_rules_guard.get("api_update_time"),
+            "quantitative_rules_violation_is_locked": quantitative_rules_guard.get("is_locked", False),
+            "quantitative_rules_violation_planned_recover_time": quantitative_rules_guard.get("planned_recover_time"),
+            "quantitative_rules_violation_indicators": quantitative_rules_guard.get("indicators", []),
         }
 
     async def _finish_paper_trading(self) -> dict:
