@@ -420,6 +420,33 @@ async def run():
 - No hacer cambios en `./static/control_mision.html` sin haber creado esa copia previa en la misma sesion de trabajo.
 - Si se hace backup de documentacion u otros archivos auxiliares, usar el mismo patron: `nombre.<version>.<tipo>`.
 
+### Semantica operativa de `SL_por_par`
+
+- `strategy.SL_por_par: true` activa un modo especial solo para operativa real en el que se mantiene `1` unico `SL` condicional de Binance por par, en lugar de `1 SL` por trade.
+- En este modo, los `TP` siguen siendo `1 por trade`; lo que cambia es solo la proteccion `SL`.
+- Para `short`, el trade "protector" del par es el trade `OPEN` con `entry_price` mas bajo. Ese es el trade que debe conservar el `SL` condicional activo del par.
+- Si entra un trade nuevo en ese par y pasa a ser el de `entry_price` mas bajo, el motor puede migrar la proteccion a ese nuevo trade. Esa rotacion debe mantenerse serializada por par para no dejar dos `SL` activos simultaneos.
+- Con `SL_por_par: true`, el recuento esperado de ordenes abiertas deja de ser `2 x trades OPEN`. Pasa a ser:
+  - `TP esperados = numero de trades OPEN`
+  - `SL esperados = numero de pares con trades OPEN y proteccion esperable`
+  - total esperado = `trades OPEN + pares protegibles`
+- Si Binance devuelve `-4045 Reach max stop order limit`, el motor no debe entrar en bucle de recolocacion de `SL`. Debe respetar el cooldown existente y tratar ese par como temporalmente sin hueco para `SL`.
+- Cuando `SL_posicion: false`, si salta el `SL` del trade protector solo se cierra ese trade. El motor debe rearmar la proteccion del par en el siguiente chequeo/reconcile:
+  - buscando el siguiente trade `OPEN` con `entry_price` mas bajo
+  - si su `SL` teorico sigue por encima del precio actual, colocandole el nuevo `SL`
+  - si ese `SL` teorico ya ha quedado por debajo del precio actual, cerrando ese trade a `MARKET` y repitiendo el proceso hasta dejar el par protegido o vacio
+- Cuando `SL_posicion: true`, si salta el `SL` del protector se mantiene la logica actual de cascada de cierres para los trades hermanos del mismo par.
+- La reconciliacion no debe volver a imponer el modelo antiguo de `1 SL por trade` cuando `SL_por_par: true`. Si se toca esa parte, conservar siempre la validacion por par y no por trade.
+- La reconciliacion debe omitir temporalmente cualquier par que tenga trades en `CLOSING` o una cascada activa. Esto evita carreras entre cierres TP/SL y recolocacion/cancelacion de ordenes durante el mismo ciclo.
+- La purga de ordenes sobrantes no debe apoyarse en snapshots viejos del inicio de `reconcile()`. Antes de cancelar ordenes hay que refrescar la foto viva de trades y posiciones para no eliminar TP/SL de entradas nuevas creadas mientras la reconciliacion sigue corriendo.
+- El modo `SL_por_par` ya ha necesitado locks por par y snapshots globales de ordenes para evitar `SL extra`, ordenes sobrantes y carreras con Binance. Cualquier refactor futuro en `src/trade_engine.py` debe preservar esas garantias.
+- Si se modifica esta logica, revisar siempre:
+  - fills `TP` y `SL` recibidos por WS
+  - reconciliacion tras reinicio
+  - pares con muchas entradas simultaneas
+  - limite de ordenes condicionales de Binance
+  - que no reaparezcan errores `-4045`, `-2022` ni cancelaciones de ordenes validas por reconciliacion
+
 ### Convenciones especificas para la integracion con el dashboard
 
 - No hacer que el bot lea directamente `dashboard_top5.html`.
