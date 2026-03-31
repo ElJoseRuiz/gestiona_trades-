@@ -14,6 +14,7 @@ strategy:
   sl_pct: 60                                    # Stop loss por trade en porcentaje.
   TP_posicion: false                            # Si es true, al tocar TP se cierran los trades hermanos del mismo par.
   SL_posicion: false                            # Si es true, al tocar SL se cierran los trades hermanos del mismo par.
+  SL_por_par: false                             # Si es true, solo mantiene un SL condicional por par y lo rota entre trades abiertos.
   Min_TP_posicion: 0.0                          # PnL mínimo combinado (%) para permitir la cascada de TP; 0 la desactiva.
   timeout_hours: 24                             # Máximo tiempo de vida de un trade antes de forzar cierre por timeout.
   leverage: 1                                   # Apalancamiento configurado en Binance para los pares que se operen.

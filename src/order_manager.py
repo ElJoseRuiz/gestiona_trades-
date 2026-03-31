@@ -38,7 +38,7 @@ log = get_logger("order_manager")
 _RETRY_CODES = {429, 500, 502, 503, 504}
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 1.5          # segundos
-ORDER_MANAGER_VERSION = "0.11"
+ORDER_MANAGER_VERSION = "1.00"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -57,6 +57,31 @@ def _round_price(value: float, tick: float) -> float:
     d_tick = decimal.Decimal(str(tick))
     d_val  = decimal.Decimal(str(value))
     return float(round(d_val / d_tick) * d_tick)
+
+
+def _to_binance_str(value: Any) -> str:
+    """
+    Convierte floats/decimals a texto decimal plano sin notación científica.
+    Binance rechaza parámetros como 2.75e-05 en price/triggerPrice.
+    """
+    text = format(decimal.Decimal(str(value)), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _normalize_binance_value(value: Any) -> Any:
+    if isinstance(value, decimal.Decimal):
+        return _to_binance_str(value)
+    if isinstance(value, float):
+        return _to_binance_str(value)
+    if isinstance(value, dict):
+        return {key: _normalize_binance_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_binance_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_normalize_binance_value(item) for item in value)
+    return value
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -86,6 +111,7 @@ class OrderManager:
     # ──────────────────────────────────────────────────────────────────
 
     def _sign(self, params: dict) -> dict:
+        params = _normalize_binance_value(dict(params))
         params["timestamp"] = int(time.time() * 1000)
         qs = urlencode(params)
         sig = hmac.new(
@@ -122,6 +148,10 @@ class OrderManager:
         return await self._request("PUT", url, params=params)
 
     async def _request(self, method: str, url: str, **kwargs) -> Any:
+        if "params" in kwargs and kwargs["params"] is not None:
+            kwargs["params"] = _normalize_binance_value(kwargs["params"])
+        if "data" in kwargs and kwargs["data"] is not None:
+            kwargs["data"] = _normalize_binance_value(kwargs["data"])
         t0 = time.time()
         last_exc = None
         for attempt in range(1, _MAX_RETRIES + 1):
@@ -163,6 +193,17 @@ class OrderManager:
             if asset.get("asset") == "USDT":
                 return float(asset.get("availableBalance", 0))
         return 0.0
+
+    async def get_api_trading_status(self, symbol: str | None = None) -> dict:
+        """
+        Devuelve el estado de las reglas cuantitativas de Binance Futures.
+        Útil para diagnosticar errores -4400 donde Binance solo permite reduceOnly.
+        """
+        params: dict[str, str] = {}
+        if symbol:
+            params["symbol"] = symbol
+        data = await self._get("/fapi/v1/apiTradingStatus", params, signed=True)
+        return data if isinstance(data, dict) else {}
 
     async def get_exchange_info(self, symbol: str) -> dict:
         """Retorna tickSize, stepSize, minQty, minNotional para el símbolo."""
@@ -341,7 +382,7 @@ class OrderManager:
             "side":         "SELL",
             "positionSide": "BOTH",
             "type":         "LIMIT",
-            "quantity":     str(quantity),
+            "quantity":     _to_binance_str(quantity),
         }
         if newClientOrderId:
             params["newClientOrderId"] = newClientOrderId
@@ -353,7 +394,7 @@ class OrderManager:
             info    = await self.get_exchange_info(symbol)
             price_r = _round_price(price, info["tick_size"])
             params["timeInForce"] = "GTX"
-            params["price"]       = str(price_r)
+            params["price"]       = _to_binance_str(price_r)
             log.info(f"[ENTRY] open_short {symbol} qty={quantity} price={price_r}")
 
         result = await self._post("/fapi/v1/order", params)
@@ -368,7 +409,7 @@ class OrderManager:
             "side":         "SELL",
             "positionSide": "BOTH",
             "type":         "MARKET",
-            "quantity":     str(quantity),
+            "quantity":     _to_binance_str(quantity),
         }
         if newClientOrderId:
             params["newClientOrderId"] = newClientOrderId
@@ -452,8 +493,8 @@ class OrderManager:
             "positionSide": "BOTH",
             "type":         "LIMIT",
             "timeInForce":  "GTX",
-            "quantity":     str(quantity),
-            "price":        str(limit_price),
+            "quantity":     _to_binance_str(quantity),
+            "price":        _to_binance_str(limit_price),
             "reduceOnly":   "true",
         }
 
@@ -484,8 +525,8 @@ class OrderManager:
             "positionSide": "BOTH",
             "type":         "STOP_MARKET",
             "algoType":     "CONDITIONAL",
-            "quantity":     str(quantity),
-            "triggerPrice": str(sl_trigger_r),
+            "quantity":     _to_binance_str(quantity),
+            "triggerPrice": _to_binance_str(sl_trigger_r),
             "workingType":  "MARK_PRICE",
             "reduceOnly":   "true",
             "priceProtect": "true",
@@ -516,8 +557,8 @@ class OrderManager:
             "positionSide": "BOTH",
             "type":         "LIMIT",
             "timeInForce":  "GTC",
-            "quantity":     str(quantity),
-            "price":        str(price_r),
+            "quantity":     _to_binance_str(quantity),
+            "price":        _to_binance_str(price_r),
             "reduceOnly":   "true",
         }
         log.info(f"[CLOSE_LIMIT] {symbol} qty={quantity} price={price_r}")
@@ -532,7 +573,7 @@ class OrderManager:
             "type":         "LIMIT",
             "timeInForce":  "GTC",
             "priceMatch":   "OPPONENT",
-            "quantity":     str(quantity),
+            "quantity":     _to_binance_str(quantity),
             "reduceOnly":   "true",
         }
         log.info(f"[CLOSE_BBO] {symbol} qty={quantity} priceMatch=OPPONENT")
@@ -545,7 +586,7 @@ class OrderManager:
             "side":         "BUY",
             "positionSide": "BOTH",
             "type":         "MARKET",
-            "quantity":     str(quantity),
+            "quantity":     _to_binance_str(quantity),
             "reduceOnly":   "true",
         }
         log.warning(f"[CLOSE_MARKET] {symbol} qty={quantity} — market order!")

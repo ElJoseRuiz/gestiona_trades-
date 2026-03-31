@@ -1,0 +1,196 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1400" viewBox="0 0 1600 1400">
+  <defs>
+    <style>
+      .title { font: 700 28px Arial, sans-serif; fill: #152238; }
+      .subtitle { font: 400 15px Arial, sans-serif; fill: #4a5b73; }
+      .box { fill: #f7f9fc; stroke: #4361ee; stroke-width: 2; rx: 16; ry: 16; }
+      .decision { fill: #fff7e6; stroke: #f59e0b; stroke-width: 2; }
+      .loopbox { fill: #eefbf3; stroke: #16a34a; stroke-width: 2; rx: 16; ry: 16; }
+      .waitbox { fill: #f3f0ff; stroke: #7c3aed; stroke-width: 2; rx: 16; ry: 16; }
+      .endbox { fill: #fff1f2; stroke: #e11d48; stroke-width: 2; rx: 16; ry: 16; }
+      .label { font: 600 16px Arial, sans-serif; fill: #14213d; }
+      .small { font: 400 14px Arial, sans-serif; fill: #22304a; }
+      .tiny { font: 400 12px Arial, sans-serif; fill: #43536b; }
+      .section { font: 700 20px Arial, sans-serif; fill: #166534; }
+      .line { stroke: #334155; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .dashed { stroke-dasharray: 7 7; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#334155"/>
+    </marker>
+  </defs>
+
+  <rect width="1600" height="1400" fill="#ffffff"/>
+
+  <text x="800" y="45" text-anchor="middle" class="title">Diagrama funcional del flujo principal de gestiona_trades</text>
+  <text x="800" y="72" text-anchor="middle" class="subtitle">Resumen operativo de App.run(), tareas en segundo plano y puntos de entrada/salida</text>
+
+  <rect x="90" y="110" width="520" height="860" fill="#fbfdff" stroke="#cbd5e1" stroke-width="2" rx="24" ry="24"/>
+  <text x="350" y="145" text-anchor="middle" class="section">Arranque y coordinacion principal</text>
+
+  <rect class="box" x="180" y="175" width="340" height="54"/>
+  <text class="label" x="350" y="208" text-anchor="middle">Inicio: App.run()</text>
+
+  <rect class="box" x="180" y="255" width="340" height="60"/>
+  <text class="label" x="350" y="284" text-anchor="middle">1. Cargar config y logging</text>
+  <text class="tiny" x="350" y="303" text-anchor="middle">versiones, modo, banderas paper y solo_cerrando</text>
+
+  <rect class="box" x="180" y="340" width="340" height="60"/>
+  <text class="label" x="350" y="369" text-anchor="middle">2. Inicializar SQLite</text>
+  <text class="tiny" x="350" y="388" text-anchor="middle">StateDB.init()</text>
+
+  <rect class="box" x="180" y="425" width="340" height="70"/>
+  <text class="label" x="350" y="454" text-anchor="middle">3. Inicializar Binance REST</text>
+  <text class="tiny" x="350" y="473" text-anchor="middle">OrderManager.init() + verificacion de balance</text>
+
+  <rect class="box" x="180" y="520" width="340" height="72"/>
+  <text class="label" x="350" y="549" text-anchor="middle">4. Crear managers y engines</text>
+  <text class="tiny" x="350" y="568" text-anchor="middle">WSManager + TradeEngine + PaperTradeEngine</text>
+
+  <rect class="box" x="180" y="617" width="340" height="72"/>
+  <text class="label" x="350" y="646" text-anchor="middle">5. Cargar trades activos</text>
+  <text class="tiny" x="350" y="665" text-anchor="middle">DB real y paper</text>
+
+  <rect class="box" x="180" y="714" width="340" height="72"/>
+  <text class="label" x="350" y="743" text-anchor="middle">6. Reconciliar con Binance</text>
+  <text class="tiny" x="350" y="762" text-anchor="middle">recoloca TP/SL, limpia huerfanas, sincroniza estado</text>
+
+  <rect class="box" x="180" y="811" width="340" height="72"/>
+  <text class="label" x="350" y="840" text-anchor="middle">7. Configurar leverage y margin</text>
+  <text class="tiny" x="350" y="859" text-anchor="middle">solo para pares activos detectados</text>
+
+  <rect class="waitbox" x="180" y="908" width="340" height="72"/>
+  <text class="label" x="350" y="937" text-anchor="middle">8. Arrancar servicios y esperar</text>
+  <text class="tiny" x="350" y="956" text-anchor="middle">WS, engines, watcher, dashboard, notifier, STARTUP</text>
+
+  <line class="line" x1="350" y1="229" x2="350" y2="255"/>
+  <line class="line" x1="350" y1="315" x2="350" y2="340"/>
+  <line class="line" x1="350" y1="400" x2="350" y2="425"/>
+  <line class="line" x1="350" y1="495" x2="350" y2="520"/>
+  <line class="line" x1="350" y1="592" x2="350" y2="617"/>
+  <line class="line" x1="350" y1="689" x2="350" y2="714"/>
+  <line class="line" x1="350" y1="786" x2="350" y2="811"/>
+  <line class="line" x1="350" y1="883" x2="350" y2="908"/>
+
+  <polygon class="decision" points="760,205 870,275 760,345 650,275"/>
+  <text class="label" x="760" y="270" text-anchor="middle">paper_trading</text>
+  <text class="small" x="760" y="290" text-anchor="middle">activo?</text>
+
+  <rect class="box" x="620" y="380" width="280" height="66"/>
+  <text class="label" x="760" y="408" text-anchor="middle">Restaurar trades paper</text>
+  <text class="tiny" x="760" y="427" text-anchor="middle">o cerrar residuales si paper esta OFF</text>
+
+  <polygon class="decision" points="760,505 870,575 760,645 650,575"/>
+  <text class="label" x="760" y="570" text-anchor="middle">Nuevas entradas</text>
+  <text class="small" x="760" y="590" text-anchor="middle">permitidas?</text>
+
+  <rect class="box" x="620" y="680" width="280" height="66"/>
+  <text class="label" x="760" y="708" text-anchor="middle">Iniciar SignalWatcher</text>
+  <text class="tiny" x="760" y="727" text-anchor="middle">solo si hay entradas reales o paper</text>
+
+  <rect class="box" x="620" y="780" width="280" height="66"/>
+  <text class="label" x="760" y="808" text-anchor="middle">Iniciar Dashboard</text>
+  <text class="tiny" x="760" y="827" text-anchor="middle">API HTTP + WebSocket del dashboard</text>
+
+  <rect class="box" x="620" y="880" width="280" height="66"/>
+  <text class="label" x="760" y="908" text-anchor="middle">Iniciar Notifier</text>
+  <text class="tiny" x="760" y="927" text-anchor="middle">Telegram + evento STARTUP + loop salud</text>
+
+  <rect class="waitbox" x="620" y="980" width="280" height="76"/>
+  <text class="label" x="760" y="1008" text-anchor="middle">Bucle central</text>
+  <text class="small" x="760" y="1028" text-anchor="middle">await stop_event.wait()</text>
+  <text class="tiny" x="760" y="1047" text-anchor="middle">la App coordina; el trabajo lo hacen las tasks</text>
+
+  <line class="line" x1="520" y1="944" x2="620" y2="1018"/>
+  <line class="line" x1="520" y1="944" x2="760" y2="345"/>
+  <line class="line" x1="760" y1="345" x2="760" y2="380"/>
+  <line class="line" x1="760" y1="446" x2="760" y2="505"/>
+  <line class="line" x1="760" y1="645" x2="760" y2="680"/>
+  <line class="line" x1="760" y1="746" x2="760" y2="780"/>
+  <line class="line" x1="760" y1="846" x2="760" y2="880"/>
+  <line class="line" x1="760" y1="946" x2="760" y2="980"/>
+
+  <text class="tiny" x="885" y="250">Si</text>
+  <text class="tiny" x="885" y="565">Si</text>
+  <text class="tiny" x="600" y="565">No: no iniciar watcher</text>
+
+  <rect x="980" y="110" width="530" height="860" fill="#f9fdf9" stroke="#c7e9d0" stroke-width="2" rx="24" ry="24"/>
+  <text x="1245" y="145" text-anchor="middle" class="section">Tareas y bucles vivos del sistema</text>
+
+  <rect class="loopbox" x="1030" y="190" width="430" height="104"/>
+  <text class="label" x="1245" y="220" text-anchor="middle">SignalWatcher loop</text>
+  <text class="small" x="1245" y="245" text-anchor="middle">lee CSV por polling y emite on_signal()</text>
+  <text class="tiny" x="1245" y="266" text-anchor="middle">si paper_trading: PaperTradeEngine.on_signal()</text>
+  <text class="tiny" x="1245" y="284" text-anchor="middle">si real: setup de par + TradeEngine.on_signal()</text>
+
+  <rect class="loopbox" x="1030" y="320" width="430" height="104"/>
+  <text class="label" x="1245" y="350" text-anchor="middle">WSManager loop</text>
+  <text class="small" x="1245" y="375" text-anchor="middle">escucha fills y updates de Binance</text>
+  <text class="tiny" x="1245" y="396" text-anchor="middle">entry fill, tp fill, sl fill, account update</text>
+  <text class="tiny" x="1245" y="414" text-anchor="middle">proxy -> TradeEngine callbacks</text>
+
+  <rect class="loopbox" x="1030" y="450" width="430" height="104"/>
+  <text class="label" x="1245" y="480" text-anchor="middle">TradeEngine timeout loop</text>
+  <text class="small" x="1245" y="505" text-anchor="middle">revisa trades OPEN y fuerza cierres por timeout</text>
+  <text class="tiny" x="1245" y="526" text-anchor="middle">cancela TP/SL y cierra por BBO, LIMIT o MARKET</text>
+
+  <rect class="loopbox" x="1030" y="580" width="430" height="104"/>
+  <text class="label" x="1245" y="610" text-anchor="middle">TradeEngine reconcile loop</text>
+  <text class="small" x="1245" y="635" text-anchor="middle">cada 10 min o antes si detecta desajuste</text>
+  <text class="tiny" x="1245" y="656" text-anchor="middle">re-registra TP/SL, recoloca faltantes, purga huerfanas</text>
+  <text class="tiny" x="1245" y="674" text-anchor="middle">y sincroniza DB con Binance</text>
+
+  <rect class="loopbox" x="1030" y="710" width="430" height="104"/>
+  <text class="label" x="1245" y="740" text-anchor="middle">Notification loop</text>
+  <text class="small" x="1245" y="765" text-anchor="middle">salud del sistema, WS, huerfanas y resumenes</text>
+  <text class="tiny" x="1245" y="786" text-anchor="middle">Telegram: startup, shutdown, errores, resumen, WS DOWN</text>
+
+  <rect class="loopbox" x="1030" y="840" width="430" height="104"/>
+  <text class="label" x="1245" y="870" text-anchor="middle">Dashboard server</text>
+  <text class="small" x="1245" y="895" text-anchor="middle">REST + WebSocket para control_mision</text>
+  <text class="tiny" x="1245" y="916" text-anchor="middle">status, trades, eventos, config y acciones manuales</text>
+
+  <rect class="box" x="1095" y="990" width="300" height="78"/>
+  <text class="label" x="1245" y="1018" text-anchor="middle">Punto de convergencia</text>
+  <text class="small" x="1245" y="1038" text-anchor="middle">TradeEngine actualiza trades</text>
+  <text class="tiny" x="1245" y="1057" text-anchor="middle">y App._on_event() guarda eventos y los difunde</text>
+
+  <line class="line dashed" x1="900" y1="1018" x2="1030" y2="242"/>
+  <line class="line dashed" x1="900" y1="1018" x2="1030" y2="372"/>
+  <line class="line dashed" x1="900" y1="1018" x2="1030" y2="502"/>
+  <line class="line dashed" x1="900" y1="1018" x2="1030" y2="632"/>
+  <line class="line dashed" x1="900" y1="1018" x2="1030" y2="762"/>
+  <line class="line dashed" x1="900" y1="1018" x2="1030" y2="892"/>
+  <line class="line dashed" x1="1460" y1="242" x2="1395" y2="1029"/>
+  <line class="line dashed" x1="1460" y1="372" x2="1395" y2="1029"/>
+  <line class="line dashed" x1="1460" y1="502" x2="1395" y2="1029"/>
+  <line class="line dashed" x1="1460" y1="632" x2="1395" y2="1029"/>
+  <line class="line dashed" x1="1460" y1="762" x2="1395" y2="1029"/>
+  <line class="line dashed" x1="1460" y1="892" x2="1395" y2="1029"/>
+
+  <rect x="90" y="1000" width="1420" height="290" fill="#fffdf7" stroke="#eab308" stroke-width="2" rx="24" ry="24"/>
+  <text x="800" y="1035" text-anchor="middle" class="section">Senales, eventos y apagado</text>
+
+  <rect class="box" x="150" y="1070" width="350" height="86"/>
+  <text class="label" x="325" y="1100" text-anchor="middle">Flujo de una senal</text>
+  <text class="small" x="325" y="1125" text-anchor="middle">CSV -> App._on_signal() -> Engine</text>
+  <text class="tiny" x="325" y="1146" text-anchor="middle">SignalWatcher, setup del par, apertura y chase loop</text>
+
+  <rect class="box" x="625" y="1070" width="350" height="86"/>
+  <text class="label" x="800" y="1100" text-anchor="middle">Flujo de un fill</text>
+  <text class="small" x="800" y="1125" text-anchor="middle">WS -> callback proxy -> TradeEngine</text>
+  <text class="tiny" x="800" y="1146" text-anchor="middle">entry fill, tp fill, sl fill, cascadas, cierres y PnL</text>
+
+  <rect class="box" x="1100" y="1070" width="350" height="86"/>
+  <text class="label" x="1275" y="1100" text-anchor="middle">Flujo de evento</text>
+  <text class="small" x="1275" y="1125" text-anchor="middle">TradeEngine -> App._on_event()</text>
+  <text class="tiny" x="1275" y="1146" text-anchor="middle">save_event, broadcast dashboard y aviso Telegram si ERROR</text>
+
+  <rect class="endbox" x="420" y="1195" width="760" height="70"/>
+  <text class="label" x="800" y="1225" text-anchor="middle">Shutdown graceful</text>
+  <text class="small" x="800" y="1248" text-anchor="middle">stop watcher -> stop dashboard -> stop engine -> stop WS -> cerrar notifier, OrderManager y DB -> evento SHUTDOWN</text>
+
+  <line class="line" x1="500" y1="1113" x2="625" y2="1113"/>
+  <line class="line" x1="975" y1="1113" x2="1100" y2="1113"/>
+  <line class="line" x1="800" y1="1056" x2="800" y2="1195"/>
+</svg>

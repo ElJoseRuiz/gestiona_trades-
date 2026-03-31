@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1500" viewBox="0 0 1400 1500">
+  <defs>
+    <style>
+      .title { font: 700 32px Arial, sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 16px Arial, sans-serif; fill: #475569; }
+      .label { font: 700 18px Arial, sans-serif; fill: #0f172a; }
+      .small { font: 400 15px Arial, sans-serif; fill: #1e293b; }
+      .tiny { font: 400 13px Arial, sans-serif; fill: #475569; }
+      .box { fill: #f8fbff; stroke: #2563eb; stroke-width: 2.5; rx: 18; ry: 18; }
+      .decision { fill: #fff8e8; stroke: #d97706; stroke-width: 2.5; }
+      .end { fill: #fff1f2; stroke: #e11d48; stroke-width: 2.5; rx: 18; ry: 18; }
+      .side { fill: #f0fdf4; stroke: #16a34a; stroke-width: 2.5; rx: 18; ry: 18; }
+      .line { stroke: #334155; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .dash { stroke-dasharray: 8 8; }
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L0,8 L10,4 z" fill="#334155"/>
+    </marker>
+  </defs>
+
+  <rect width="1400" height="1500" fill="#ffffff"/>
+
+  <text x="700" y="48" text-anchor="middle" class="title">Flujo simple de una señal en gestiona_trades</text>
+  <text x="700" y="76" text-anchor="middle" class="subtitle">Desde la lectura del CSV hasta el cierre del trade en real o paper</text>
+
+  <rect class="box" x="470" y="120" width="460" height="72"/>
+  <text class="label" x="700" y="152" text-anchor="middle">1. SignalWatcher lee una señal del CSV</text>
+  <text class="tiny" x="700" y="174" text-anchor="middle">polling, cursor local, filtros básicos de edad y formato</text>
+
+  <rect class="box" x="470" y="235" width="460" height="88"/>
+  <text class="label" x="700" y="267" text-anchor="middle">2. App._on_signal(signal)</text>
+  <text class="small" x="700" y="291" text-anchor="middle">decide si la señal va a real, a paper, o se ignora</text>
+  <text class="tiny" x="700" y="312" text-anchor="middle">también configura leverage y margin si el par es nuevo</text>
+
+  <polygon class="decision" points="700,380 860,470 700,560 540,470"/>
+  <text class="label" x="700" y="462" text-anchor="middle">¿Se opera</text>
+  <text class="label" x="700" y="486" text-anchor="middle">en paper?</text>
+
+  <rect class="side" x="120" y="620" width="420" height="120"/>
+  <text class="label" x="330" y="652" text-anchor="middle">Ruta paper</text>
+  <text class="small" x="330" y="678" text-anchor="middle">PaperTradeEngine.on_signal()</text>
+  <text class="tiny" x="330" y="702" text-anchor="middle">abre trade virtual, simula TP/SL y guarda eventos en DB</text>
+  <text class="tiny" x="330" y="724" text-anchor="middle">no envía órdenes reales a Binance</text>
+
+  <polygon class="decision" points="930,650 1090,740 930,830 770,740"/>
+  <text class="label" x="930" y="732" text-anchor="middle">¿Real en modo</text>
+  <text class="label" x="930" y="756" text-anchor="middle">solo_cerrando?</text>
+
+  <rect class="end" x="860" y="900" width="420" height="92"/>
+  <text class="label" x="1070" y="932" text-anchor="middle">Se ignora la señal</text>
+  <text class="small" x="1070" y="957" text-anchor="middle">el bot no abre nada nuevo en real</text>
+  <text class="tiny" x="1070" y="979" text-anchor="middle">solo sigue gestionando cierres de trades existentes</text>
+
+  <rect class="box" x="690" y="900" width="300" height="92"/>
+  <text class="label" x="840" y="932" text-anchor="middle">3. TradeEngine.on_signal()</text>
+  <text class="small" x="840" y="957" text-anchor="middle">valida límites, filtros, overlap, ignore_n</text>
+  <text class="tiny" x="840" y="979" text-anchor="middle">si pasa, crea un trade real en estado SIGNAL_RECEIVED</text>
+
+  <rect class="box" x="690" y="1040" width="300" height="92"/>
+  <text class="label" x="840" y="1072" text-anchor="middle">4. Apertura del trade</text>
+  <text class="small" x="840" y="1097" text-anchor="middle">orden BBO / LIMIT / fallback MARKET</text>
+  <text class="tiny" x="840" y="1119" text-anchor="middle">estado OPENING, chase loop y espera de fill</text>
+
+  <rect class="side" x="1020" y="1032" width="250" height="108"/>
+  <text class="label" x="1145" y="1065" text-anchor="middle">WSManager</text>
+  <text class="small" x="1145" y="1090" text-anchor="middle">escucha fills reales</text>
+  <text class="tiny" x="1145" y="1112" text-anchor="middle">entry fill, tp fill, sl fill</text>
+
+  <rect class="box" x="690" y="1180" width="300" height="92"/>
+  <text class="label" x="840" y="1212" text-anchor="middle">5. Entry fill</text>
+  <text class="small" x="840" y="1237" text-anchor="middle">TradeEngine.on_entry_fill()</text>
+  <text class="tiny" x="840" y="1259" text-anchor="middle">trade pasa a OPEN y se registra precio/cantidad</text>
+
+  <rect class="box" x="690" y="1320" width="300" height="110"/>
+  <text class="label" x="840" y="1352" text-anchor="middle">6. Colocar salidas</text>
+  <text class="small" x="840" y="1377" text-anchor="middle">TP como orden basic</text>
+  <text class="small" x="840" y="1400" text-anchor="middle">SL como orden conditional</text>
+  <text class="tiny" x="840" y="1422" text-anchor="middle">si Binance lo permite, quedan vivas aunque el bot reinicie</text>
+
+  <rect class="side" x="1040" y="1318" width="250" height="112"/>
+  <text class="label" x="1165" y="1352" text-anchor="middle">Reconcile loop</text>
+  <text class="small" x="1165" y="1377" text-anchor="middle">si falta TP/SL, intenta</text>
+  <text class="small" x="1165" y="1400" text-anchor="middle">re-registrar o recolocar</text>
+
+  <polygon class="decision" points="340,1170 520,1270 340,1370 160,1270"/>
+  <text class="label" x="340" y="1261" text-anchor="middle">¿Cómo se</text>
+  <text class="label" x="340" y="1286" text-anchor="middle">cierra?</text>
+
+  <rect class="end" x="90" y="1410" width="250" height="62"/>
+  <text class="label" x="215" y="1446" text-anchor="middle">TP fill</text>
+
+  <rect class="end" x="370" y="1410" width="250" height="62"/>
+  <text class="label" x="495" y="1446" text-anchor="middle">SL fill</text>
+
+  <rect class="end" x="650" y="1410" width="250" height="62"/>
+  <text class="label" x="775" y="1446" text-anchor="middle">Timeout</text>
+
+  <rect class="end" x="930" y="1410" width="250" height="62"/>
+  <text class="label" x="1055" y="1446" text-anchor="middle">Cascada / manual / reconcile</text>
+
+  <line class="line" x1="700" y1="192" x2="700" y2="235"/>
+  <line class="line" x1="700" y1="323" x2="700" y2="380"/>
+
+  <line class="line" x1="540" y1="470" x2="330" y2="620"/>
+  <text class="tiny" x="465" y="555">Sí</text>
+
+  <line class="line" x1="860" y1="470" x2="930" y2="650"/>
+  <text class="tiny" x="900" y="555">No, va a real</text>
+
+  <line class="line" x1="930" y1="830" x2="840" y2="900"/>
+  <text class="tiny" x="760" y="860">No</text>
+
+  <line class="line" x1="1090" y1="740" x2="1070" y2="900"/>
+  <text class="tiny" x="1115" y="840">Sí</text>
+
+  <line class="line" x1="840" y1="992" x2="840" y2="1040"/>
+  <line class="line" x1="990" y1="1086" x2="1020" y2="1086"/>
+  <line class="line" x1="1145" y1="1140" x2="900" y2="1180"/>
+  <line class="line" x1="840" y1="1132" x2="840" y2="1180"/>
+  <line class="line" x1="840" y1="1272" x2="840" y2="1320"/>
+  <line class="line" x1="990" y1="1375" x2="1040" y2="1375"/>
+
+  <line class="line dash" x1="690" y1="1375" x2="520" y2="1270"/>
+  <text class="tiny" x="555" y="1320">trade OPEN vigilado</text>
+
+  <line class="line" x1="340" y1="1370" x2="215" y2="1410"/>
+  <line class="line" x1="340" y1="1370" x2="495" y2="1410"/>
+  <line class="line" x1="340" y1="1370" x2="775" y2="1410"/>
+  <line class="line" x1="340" y1="1370" x2="1055" y2="1410"/>
+
+  <text class="tiny" x="170" y="1388">TP normal</text>
+  <text class="tiny" x="465" y="1388">SL normal</text>
+  <text class="tiny" x="748" y="1388">cierre por tiempo</text>
+  <text class="tiny" x="1000" y="1388">tp_posicion, sl_posicion, cierre externo</text>
+</svg>

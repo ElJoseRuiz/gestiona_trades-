@@ -15,7 +15,7 @@ from .filtros_gestiona_trades import (
     load_filtros_gestiona_trades,
 )
 
-CONFIG_VERSION = "0.19"
+CONFIG_VERSION = "1.00"
 
 
 class Config:
@@ -115,6 +115,7 @@ class Config:
         strategy["sl_pct"] = self.sl_pct
         strategy["TP_posicion"] = self.tp_posicion
         strategy["SL_posicion"] = self.sl_posicion
+        strategy["SL_por_par"] = self.sl_por_par
         strategy["Min_TP_posicion"] = self.min_tp_posicion_pct
         strategy["tp_pos"] = self.tp_posicion
         strategy["sl_pos"] = self.sl_posicion
@@ -259,6 +260,13 @@ class Config:
     def sl_posicion(self) -> bool:
         val = self._effective_value(("gestion_trade", "sl_pos"), ("strategy", "SL_posicion"), default=False)
         return self._as_bool(val, default=False)
+
+    @property
+    def sl_por_par(self) -> bool:
+        return self._as_bool(
+            self._get("strategy", "SL_por_par", default=False),
+            default=False,
+        )
 
     @property
     def min_tp_posicion_pct(self) -> float:
