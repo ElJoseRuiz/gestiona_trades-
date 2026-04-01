@@ -38,7 +38,7 @@ log = get_logger("order_manager")
 _RETRY_CODES = {429, 500, 502, 503, 504}
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 1.5          # segundos
-ORDER_MANAGER_VERSION = "0.11"
+ORDER_MANAGER_VERSION = "0.14"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -184,12 +184,24 @@ class OrderManager:
             return info
         raise ValueError(f"Símbolo {symbol} no encontrado en exchangeInfo")
 
-    async def set_leverage(self, symbol: str, leverage: int) -> dict:
+    async def set_leverage(self, symbol: str, leverage: int) -> Optional[dict]:
+        if await self._has_open_position(symbol):
+            log.warning(
+                f"Omitiendo set_leverage({symbol}, {leverage}): hay posicion abierta "
+                "y no se permite mutar riesgo en caliente."
+            )
+            return None
         log.info(f"Configurando leverage {leverage}x para {symbol}")
         return await self._post("/fapi/v1/leverage",
                                 {"symbol": symbol, "leverage": leverage})
 
     async def set_margin_type(self, symbol: str, margin_type: str = "CROSSED") -> None:
+        if await self._has_open_position(symbol):
+            log.warning(
+                f"Omitiendo set_margin_type({symbol}, {margin_type}): hay posicion abierta "
+                "y no se permite mutar riesgo en caliente."
+            )
+            return
         try:
             await self._post("/fapi/v1/marginType",
                              {"symbol": symbol, "marginType": margin_type})
@@ -254,6 +266,10 @@ class OrderManager:
             if p["symbol"] == symbol and float(p["positionAmt"]) != 0:
                 return p
         return None
+
+    async def _has_open_position(self, symbol: str) -> bool:
+        position = await self.get_position(symbol)
+        return position is not None
 
     async def get_all_positions(self) -> list:
         """Devuelve todas las posiciones abiertas (positionAmt != 0)."""

@@ -373,7 +373,8 @@ async def run():
     # 3. Conectar REST Binance, verificar credenciales y balance
     # 4. Crear TradeEngine + WSManager
     # 5. Recuperar trades activos de DB y reconciliar con Binance
-    # 6. Configurar leverage/margin para pares activos
+    # 6. NO reconfigurar leverage/margin de pares con posicion abierta durante el arranque.
+    #    Solo preparar ajustes de riesgo en frio para pares nuevos, antes de enviar la entrada.
     # 7. Iniciar WebSocket User Data Stream
     # 8. Iniciar loop de timeout checker
     # 9. Iniciar signal watcher (CSV poller)
@@ -393,6 +394,8 @@ async def run():
 - **No** añadir frameworks web externos (el proyecto usa `aiohttp.web` deliberadamente)
 - **No** cambiar a código síncrono — toda la aplicación depende de async/await
 - **No** usar `time.sleep()` — siempre `await asyncio.sleep()`
+- **No** enviar cambios de `leverage` o `marginType` sobre simbolos con posicion abierta durante el arranque, la reconciliacion o cualquier flujo "en caliente"
+- **No** introducir fixes globales de riesgo para resolver incidentes aislados de un par sin validar antes el impacto sobre TP/SL y ordenes condicionales ya vivas en Binance
 
 ### Áreas de alta sensibilidad
 
@@ -401,6 +404,29 @@ async def run():
 - `src/state.py` — persistencia; mantener backward-compatible el esquema de DB
 - `src/signal_watcher.py` — cualquier ampliacion de filtros debe preservar compatibilidad con señales actuales y registrar claramente los rechazos
 - futura capa de perfil (`src/filtros_gestiona_trades.py` o `src/strategy_profile.py`) — debe ser tolerante, auditable y no romper el arranque si el fichero falta
+
+### Salvaguarda critica en Binance para `leverage`, `marginType` y reconciliacion
+
+Descubrimiento operativo confirmado por logs:
+
+- Cambiar `leverage` a una posicion viva despues de reconciliarla y despues de revalidar sus TP/SL puede provocar que Binance recalcule el riesgo y auto-cancele ordenes condicionales perifericas.
+- Intentar cambiar `marginType` con posicion abierta puede devolver `HTTP 400`; no debe tratarse como una operacion segura ni como parte del arranque normal.
+- Un fix pensado para un caso aislado de un simbolo no debe convertirse en una mutacion global de riesgo para todos los pares activos.
+
+Reglas obligatorias:
+
+- Las llamadas a `POST /fapi/v1/leverage` y `POST /fapi/v1/marginType` solo pueden ejecutarse en frio, antes de enviar una orden de entrada nueva.
+- Durante el arranque, la reconciliacion y la recuperacion de trades historicos, nunca iterar pares activos para forzar `leverage` o `marginType`.
+- Antes de cualquier intento de configurar `leverage` o `marginType`, consultar `GET /fapi/v2/positionRisk`.
+- Si `positionAmt != 0`, silenciar la reconfiguracion y omitirla por completo para ese simbolo.
+- Si ya existen TP/SL u otras ordenes condicionales asociadas a una posicion viva, tratar cualquier cambio de riesgo como operacion prohibida salvo instruccion explicita, razonada y validada.
+- Si aparece un incidente puntual como `Margin is insufficient` en un simbolo concreto, investigar primero calculo de nocional, filtros, direccion, limites y margen disponible antes de introducir reglas globales.
+
+Politica de diseño:
+
+- La declaracion de riesgo debe quedar desacoplada del bucle de reconciliacion.
+- Reconciliar significa observar, mapear y reanudar gestion; no reescribir el riesgo estructural de posiciones ya abiertas.
+- Si hay duda sobre el impacto de una mutacion de riesgo en Binance, priorizar conservar TP/SL vivos y pedir confirmacion antes de automatizar ese cambio.
 
 ## Convenciones de Codigo
 

@@ -39,7 +39,7 @@ from .ws_manager import WSManager
 log = get_logger("trade_engine")
 
 OnEventCallback = Callable[[Event], Awaitable[None]]
-TRADE_ENGINE_VERSION = "0.12"
+TRADE_ENGINE_VERSION = "0.14"
 
 
 class TradeEngine:
@@ -1399,6 +1399,52 @@ class TradeEngine:
         await self._db.save_trade(trade)
         return True
 
+    def _hay_otros_trades_locales_activos_para_par(self,
+                                                   pair: str,
+                                                   exclude_trade_id: str) -> bool:
+        return any(
+            t.trade_id != exclude_trade_id
+            and t.pair == pair
+            and t.status in (
+                TradeStatus.OPENING,
+                TradeStatus.OPEN,
+                TradeStatus.CLOSING,
+            )
+            for t in self._trades.values()
+        )
+
+    async def _cantidad_objetivo_cierre_cascada(self,
+                                                trade: Trade,
+                                                fallback_qty: float,
+                                                etapa: str) -> float:
+        """
+        Si este trade es el ultimo activo local del par, usa el positionAmt
+        vivo de Binance como cantidad exacta antes de enviar la orden.
+        """
+        if self._hay_otros_trades_locales_activos_para_par(trade.pair, trade.trade_id):
+            return fallback_qty
+
+        try:
+            position = await self._order_mgr.get_position(trade.pair)
+        except Exception as e:
+            log.warning(
+                f"No se pudo consultar positionRisk de {trade.pair} en {etapa}: {e}"
+            )
+            return fallback_qty
+
+        if position is None:
+            return fallback_qty
+
+        live_qty = abs(float(position.get("positionAmt", 0) or 0))
+        if live_qty <= 0:
+            return fallback_qty
+
+        log.info(
+            f"Trade {trade.trade_id[:8]} usa qty viva de Binance en {etapa}: "
+            f"{live_qty} (fallback local={fallback_qty})"
+        )
+        return live_qty
+
     async def _close_sibling_trades(self, pair: str, trigger_type: str, exclude_trade_id: str):
         """
         Cierra trades hermanos en cascada con un modelo Maker Progresivo.
@@ -1477,12 +1523,20 @@ class TradeEngine:
                         info = await self._order_mgr.get_exchange_info(pair)
                         tick_size = info["tick_size"]
                         tick_dec = Decimal(str(tick_size))
+                        qty_objetivo_1 = await self._cantidad_objetivo_cierre_cascada(
+                            t, float(t.entry_quantity or 0), "TP intento 1"
+                        )
 
                         # --- INTENTO 1: LIMIT (Mid Price) ---
                         mid_price_rounded = float(Decimal(str(mid_price)).quantize(tick_dec))
-                        log.info(f"Trade {t.trade_id[:8]} cascada TP (GANANDO). Intento 1 (LIMIT) en {mid_price_rounded}")
+                        log.info(
+                            f"Trade {t.trade_id[:8]} cascada TP (GANANDO). "
+                            f"Intento 1 (LIMIT) en {mid_price_rounded} por qty {qty_objetivo_1}"
+                        )
 
-                        limit_1 = await self._order_mgr.close_position_limit(t.pair, t.entry_quantity, mid_price_rounded)
+                        limit_1 = await self._order_mgr.close_position_limit(
+                            t.pair, qty_objetivo_1, mid_price_rounded
+                        )
                         close_oid_1 = int(limit_1["orderId"])
 
                         filled_p1 = await self._wait_close_fill(close_oid_1, t.pair, 60.0)
@@ -1518,7 +1572,7 @@ class TradeEngine:
                             except Exception as ce:
                                 log.warning(f"Trade {t.trade_id[:8]} ignorando fallo al cancelar L1 (-2011 carrera): {ce}")
 
-                        rem_qty_1 = t.entry_quantity - exec_qty_1
+                        rem_qty_1 = max(qty_objetivo_1 - exec_qty_1, 0.0)
 
                         # Si se llenó por completo silenciosamente
                         if rem_qty_1 <= 0 or status_1 == "FILLED":
@@ -1546,17 +1600,21 @@ class TradeEngine:
 
                         aggro_maker_price = (new_mid + new_ask) / 2.0
                         aggro_rounded = float(Decimal(str(aggro_maker_price)).quantize(tick_dec))
+                        qty_objetivo_2 = await self._cantidad_objetivo_cierre_cascada(
+                            t, rem_qty_1, "TP intento 2"
+                        )
 
-                        log.info(f"Trade {t.trade_id[:8]} cascada TP. Intento 2 (LIMIT Agresivo) en {aggro_rounded} por qty {rem_qty_1}")
+                        log.info(f"Trade {t.trade_id[:8]} cascada TP. Intento 2 (LIMIT Agresivo) en {aggro_rounded} por qty {qty_objetivo_2}")
 
-                        limit_2 = await self._order_mgr.close_position_limit(t.pair, rem_qty_1, aggro_rounded)
+                        limit_2 = await self._order_mgr.close_position_limit(t.pair, qty_objetivo_2, aggro_rounded)
                         close_oid_2 = int(limit_2["orderId"])
 
                         filled_p2 = await self._wait_close_fill(close_oid_2, t.pair, 60.0)
 
                         if filled_p2:
                             if exec_qty_1 > 0:
-                                t.exit_price = ((avg_p1 * exec_qty_1) + (filled_p2 * rem_qty_1)) / t.entry_quantity
+                                qty_total_real = exec_qty_1 + qty_objetivo_2
+                                t.exit_price = ((avg_p1 * exec_qty_1) + (filled_p2 * qty_objetivo_2)) / qty_total_real
                                 t.exit_type = "TP_CASCADE_MIXED_LIMITS"
                             else:
                                 t.exit_price = filled_p2
@@ -1590,22 +1648,27 @@ class TradeEngine:
                             except Exception as ce:
                                 log.warning(f"Trade {t.trade_id[:8]} ignorando fallo al cancelar L2 (-2011 carrera): {ce}")
 
-                        rem_qty_final = rem_qty_1 - exec_qty_2
+                        rem_qty_final = max(qty_objetivo_2 - exec_qty_2, 0.0)
 
                         if rem_qty_final > 0:
                             # --- INTENTO 3: MARKET (Liquidación Final) ---
-                            mkt_res = await self._order_mgr.close_position_market(t.pair, rem_qty_final)
+                            qty_objetivo_final = await self._cantidad_objetivo_cierre_cascada(
+                                t, rem_qty_final, "TP fallback MARKET final"
+                            )
+                            mkt_res = await self._order_mgr.close_position_market(t.pair, qty_objetivo_final)
                             mkt_p = float(mkt_res.get("avgPrice") or mkt_res.get("price") or 0)
 
-                            total_val = (exec_qty_1 * avg_p1) + (exec_qty_2 * avg_p2) + (rem_qty_final * mkt_p)
-                            t.exit_price = total_val / t.entry_quantity
+                            qty_total_real = exec_qty_1 + exec_qty_2 + qty_objetivo_final
+                            total_val = (exec_qty_1 * avg_p1) + (exec_qty_2 * avg_p2) + (qty_objetivo_final * mkt_p)
+                            t.exit_price = total_val / qty_total_real
                             t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
                             t.exit_type = "TP_CASCADE_MARKET_FALLBACK"
                             await self._close_trade(t)
                             return
                         else:
+                            qty_total_real = exec_qty_1 + exec_qty_2
                             total_val = (exec_qty_1 * avg_p1) + (exec_qty_2 * avg_p2)
-                            t.exit_price = total_val / t.entry_quantity
+                            t.exit_price = total_val / qty_total_real if qty_total_real > 0 else avg_p2
                             t.exit_fill_ts = datetime.now(timezone.utc).isoformat()
                             t.exit_type = "TP_CASCADE_MIXED_LIMITS"
                             await self._close_trade(t)
@@ -1625,7 +1688,10 @@ class TradeEngine:
                     return
 
                 # Fallback Estructural / Perdedores Directos
-                result = await self._order_mgr.close_position_market(t.pair, t.entry_quantity)
+                qty_market = await self._cantidad_objetivo_cierre_cascada(
+                    t, float(t.entry_quantity or 0), f"{trigger_type} fallback MARKET"
+                )
+                result = await self._order_mgr.close_position_market(t.pair, qty_market)
                 exit_price = float(result.get("avgPrice") or result.get("price") or 0)
 
                 t.exit_price = exit_price
