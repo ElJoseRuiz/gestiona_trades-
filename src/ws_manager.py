@@ -23,6 +23,7 @@ from .logger import get_logger
 from .order_manager import OrderManager
 
 log = get_logger("ws_manager")
+WS_MANAGER_VERSION = "0.12"
 
 OnFillCallback = Callable[[dict], Awaitable[None]]
 
@@ -101,7 +102,7 @@ class WSManager:
 
     async def start(self):
         self._task = asyncio.create_task(self._run_loop(), name="ws_manager")
-        log.info("WSManager iniciado")
+        log.info(f"WSManager v{WS_MANAGER_VERSION} iniciado")
 
     async def stop(self):
         if self._task:
@@ -169,11 +170,14 @@ class WSManager:
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:
-            log.warning(f"WS mensaje no JSON: {raw[:200]}")
+            log.warning(f"WS mensaje no JSON: {raw}")
             return
 
         event_type = msg.get("e")
-        log.debug(f"WS msg: {event_type} → {str(msg)[:300]}")
+        log.debug(
+            f"WS msg: {event_type} -> "
+            f"{json.dumps(msg, ensure_ascii=False, sort_keys=True)}"
+        )
 
         if event_type != "ORDER_TRADE_UPDATE":
             return

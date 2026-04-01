@@ -8,10 +8,10 @@ Secuencia de arranque:
     1. Cargar config.yaml, inicializar logging
     2. Conectar DB (SQLite)
     3. Conectar a Binance REST, verificar credenciales y balance
-    4. Configurar leverage y margin type (isolated) para los pares activos
-    5. Cargar trades activos de la DB
-    6. Inicializar TradeEngine y WSManager
-    7. Reconciliar trades activos con el estado real en Binance
+    4. Cargar trades activos de la DB
+    5. Inicializar TradeEngine y WSManager
+    6. Reconciliar trades activos con el estado real en Binance
+    7. Reservar leverage y margin type solo para entradas nuevas, nunca en caliente
     8. Iniciar WebSocket User Data Stream
     9. Iniciar TradeEngine (timeout checker y reconcile checker)
     10. Iniciar SignalWatcher
@@ -56,7 +56,7 @@ from src.state         import StateDB
 from src.trade_engine  import TradeEngine
 from src.ws_manager    import WSManager
 
-APP_VERSION = "0.24"
+APP_VERSION = "0.25"
 
 log = get_logger("main")
 
@@ -161,23 +161,14 @@ class App:
                 await self._paper_engine.restore(active_paper_trades)
                 await self._paper_engine.close_all_for_session_end()
 
-            # 5. Configurar leverage + margin type SOLO para los pares que SIGUEN activos
+            # 5. No reconfigurar riesgo sobre trades ya reconciliados
             current_active = self._engine.get_active_trades()
             if current_active:
-                pairs_to_setup = {t.pair for t in current_active}
-                self._configured_pairs.update(pairs_to_setup)
-
-                # Ejecución concurrente en batches de 10 para no saturar el rate limit REST
-                async def _setup_batch(pairs_batch: list):
-                    for p in pairs_batch:
-                        await self._setup_pair(p)
-
-                pairs_list = list(pairs_to_setup)
-                tasks = [
-                    _setup_batch(pairs_list[i:i + 10])
-                    for i in range(0, len(pairs_list), 10)
-                ]
-                await asyncio.gather(*tasks)
+                log.info(
+                    "Arranque con %s pares activos reconciliados: se omite cualquier "
+                    "cambio de leverage/margin hasta futuras entradas nuevas.",
+                    len({t.pair for t in current_active}),
+                )
 
             # 6. Iniciar WSManager
             await self._ws_mgr.start()
@@ -253,8 +244,23 @@ class App:
     # Configuración de par: leverage + margin type
     # ──────────────────────────────────────────────────────────────────
 
-    async def _setup_pair(self, pair: str):
-        """Configura leverage e ISOLATED margin para un par."""
+    async def _setup_pair(self, pair: str) -> bool:
+        """Configura riesgo solo en frío y devuelve True si puede cachearse."""
+        try:
+            position = await self._om.get_position(pair)
+        except BinanceError as e:
+            log.warning(f"No se pudo verificar positionRisk de {pair}: {e}")
+            return False
+
+        if position is not None:
+            position_amt = float(position.get("positionAmt", 0) or 0)
+            log.warning(
+                f"Omitiendo setup de riesgo para {pair}: positionAmt={position_amt} "
+                "y cualquier cambio de leverage/margin en caliente queda prohibido."
+            )
+            return False
+
+        setup_ok = True
         try:
             await self._om.set_margin_type(pair, "ISOLATED")
         except BinanceError as e:
@@ -264,11 +270,17 @@ class App:
                 pass
             else:
                 log.warning(f"set_margin_type({pair}): {e}")
+                setup_ok = False
         try:
-            await self._om.set_leverage(pair, self._cfg.leverage)
+            leverage_result = await self._om.set_leverage(pair, self._cfg.leverage)
+            if leverage_result is None:
+                return False
             log.info(f"Leverage {self._cfg.leverage}x configurado para {pair}")
         except BinanceError as e:
             log.warning(f"set_leverage({pair}): {e}")
+            setup_ok = False
+
+        return setup_ok
 
     # ──────────────────────────────────────────────────────────────────
     # Callbacks proxy (conectan WS → TradeEngine)
@@ -304,8 +316,8 @@ class App:
 
         # Configurar leverage/margin solo la primera vez que vemos el par (caché en memoria)
         if signal.pair not in self._configured_pairs:
-            await self._setup_pair(signal.pair)
-            self._configured_pairs.add(signal.pair)
+            if await self._setup_pair(signal.pair):
+                self._configured_pairs.add(signal.pair)
         await self._engine.on_signal(signal)
 
     # ──────────────────────────────────────────────────────────────────
